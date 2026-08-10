@@ -1,26 +1,54 @@
-import random
+import matplotlib.pyplot as plt
 
 from environment import ShipEnvironment
 
+
+def display_environment(environment: ShipEnvironment) -> None:
+    fig, ax = plt.subplots()
+
+    # Draw compartments
+    for compartment in environment.compartments:
+        polygon = compartment.geometry
+        x, y = polygon.exterior.xy
+
+        ax.fill(
+            x,
+            y,
+            alpha=0.3,
+            edgecolor="black",
+        )
+
+        centre = polygon.centroid
+
+        ax.text(
+            centre.x,
+            centre.y,
+            compartment.name,
+            horizontalalignment="center",
+            verticalalignment="center",
+        )
+
+    # Draw walls
+    for wall in environment.walls:
+        line = wall.geometry
+        x, y = line.xy
+
+        ax.plot(
+            x,
+            y,
+            color="black",
+            linewidth=3,
+        )
+
+    ax.set_title("Ship Layout")
+    ax.set_xlabel("X position (m)")
+    ax.set_ylabel("Y position (m)")
+    ax.set_aspect("equal")
+    ax.grid(True)
+
+    plt.show()
+
+
 environment = ShipEnvironment.from_config("ship_layout.yaml")
 
-position = (2.0, 2.0)
-print(environment.compartment_at(position))
-# Engine Room
-
-crossed = environment.walls_crossed(
-    p1=(2.0, 2.0),
-    p2=(8.0, 2.0),
-)
-
-print([wall.name for wall in crossed])
-# ['Engine-Machinery Bulkhead']
-
-rng = random.Random(42)
-
-random_position = environment.random_point_in(
-    "Machinery Room",
-    rng,
-)
-
-print(random_position)
+display_environment(environment)

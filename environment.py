@@ -34,6 +34,8 @@ class Compartment:
     def geometry(self) -> Polygon:
         return Polygon(self.boundary)
 
+class EnvironmentConfigError(ValueError):
+    """Raised when a ship environment configuration is invalid."""
 
 
 @dataclass
@@ -247,9 +249,6 @@ class ShipEnvironment:
             compartments=compartments,
             walls=walls,
         )
-
-class EnvironmentConfigError(ValueError):
-    """Raised when a ship environment configuration is invalid."""
 
 
 def parse_coord(value: Any, location: str) -> Coord:
