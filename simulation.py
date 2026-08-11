@@ -61,11 +61,11 @@ re1 = Receiver("Phone-Desk", (3, 5.9, 0.7))
 re2 = Receiver("Phone-Engine", (2, 1, 1))
 network = Network.from_config("layouts/simple_layout2.yaml", access_points=[ap], receivers=[re1, re2])
 
-print("Phone-Desk to Router RSSI")
+print("Phone-Desk to Router readings")
 for i in range(10):
-    print(network.rssi(ap, re1, rng))
-print("\nPhone-Engine to Router RSSI")
+    print(f"{i}: {network.reading(ap, re1, rng)}")
+print("\nPhone-Engine to Router readings")
 for i in range(10):
-    print(network.rssi(ap, re2, rng))
+    print(f"{i}: {network.reading(ap, re2, rng)}")
 
 display_network(network)
