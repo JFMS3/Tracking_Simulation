@@ -76,21 +76,15 @@ class ShipEnvironment:
             with config_path.open("r", encoding="utf-8") as file:
                 config = yaml.safe_load(file)
         except OSError as exc:
-            raise EnvironmentConfigError(
-                f"Could not read configuration file: {config_path}"
-            ) from exc
+            raise EnvironmentConfigError(f"Could not read configuration file: {config_path}") from exc
         except yaml.YAMLError as exc:
-            raise EnvironmentConfigError(
-                f"Invalid YAML in configuration file: {config_path}"
-            ) from exc
+            raise EnvironmentConfigError(f"Invalid YAML in configuration file: {config_path}") from exc
 
         if config is None:
             config = {}
 
         if not isinstance(config, Mapping):
-            raise EnvironmentConfigError(
-                "The top level of the configuration must be a mapping"
-            )
+            raise EnvironmentConfigError("The top level of the configuration must be a mapping")
 
         return cls.from_dict(config)
 
@@ -169,7 +163,8 @@ class ShipEnvironment:
 
             if polygon.is_empty or polygon.area == 0:
                 raise EnvironmentConfigError(
-                    f"Compartment '{name}' has a zero-area boundary"
+                    f"Compartment '{name}' has a zero-area boundary. \
+                    Note walls have to be defined sequentially"
                 )
 
             if not polygon.is_valid:
