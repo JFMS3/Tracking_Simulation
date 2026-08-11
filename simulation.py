@@ -49,6 +49,5 @@ def display_environment(environment: ShipEnvironment) -> None:
     plt.show()
 
 
-environment = ShipEnvironment.from_config("ship_layout.yaml")
-
+environment = ShipEnvironment.from_config("layouts/simple_layout2.yaml")
 display_environment(environment)

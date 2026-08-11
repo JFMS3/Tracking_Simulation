@@ -1,0 +1,104 @@
+compartments:
+  - name: Engine Room
+    deck: main
+    boundary:
+      - [0, 0]
+      - [6, 0]
+      - [6, 4]
+      - [0, 4]
+
+  - name: Machinery Room
+    deck: main
+    boundary:
+      - [6, 0]
+      - [10, 0]
+      - [10, 4]
+      - [6, 4]
+
+  - name: Guest Room A
+    deck: main
+    boundary:
+      - [0, 4]
+      - [4, 4]
+      - [4, 7]
+      - [0, 7]
+
+  - name: Guest Room B
+    deck: main
+    boundary:
+      - [10, 4]
+      - [10, 7]
+      - [6, 7]
+      - [6, 4]
+
+  - name: Laundry
+    deck: main
+    boundary:
+      - [4, 4]
+      - [4, 7]
+      - [6, 7]
+      - [6, 4]
+
+
+walls:
+  - name: Left Major
+    p1: [0, 0]
+    p2: [0, 7]
+    material: steel_bulkhead
+    dropout_prob: 0.30
+
+  - name: Right Major
+    p1: [10, 0]
+    p2: [10, 7]
+    material: steel_bulkhead
+    dropout_prob: 0.30
+
+  - name: Bottom Major
+    p1: [0, 0]
+    p2: [10, 0]
+    material: steel_bulkhead
+    dropout_prob: 0.30
+
+  - name: Top Major
+    p1: [2, 7]
+    p2: [8, 7]
+    material: steel_bulkhead
+    dropout_prob: 0.30
+
+  - name: Guest A Window
+    p1: [0, 7]
+    p2: [1, 7]
+    material: steel_bulkhead
+    dropout_prob: 0.30
+
+  - name: Guest B Window
+    p1: [9, 7]
+    p2: [10, 7]
+    material: steel_bulkhead
+    dropout_prob: 0.30
+
+  - name: Middle Seperator
+    p1: [0, 4]
+    p2: [10, 4]
+    material: steel_bulkhead
+    dropout_prob: 0.30
+
+  - name: Guest Room A Right
+    p1: [4, 4]
+    p2: [4, 7]
+    material: steel_bulkhead
+    dropout_prob: 0.30
+
+  - name: Laundry Right
+    p1: [6, 4]
+    p2: [6, 7]
+    material: steel_bulkhead
+    dropout_prob: 0.30
+
+  - name: Engine Room Right
+    p1: [6, 0]
+    p2: [6, 4]
+    material: steel_bulkhead
+    dropout_prob: 0.30
+
+

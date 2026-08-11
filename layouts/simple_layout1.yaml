@@ -33,3 +33,9 @@ walls:
     p2: [10, 4]
     material: steel_bulkhead
     dropout_prob: 0.30
+
+  - name: Engine Room Base
+    p1: [10, 0]
+    p2: [10, 4]
+    material: steel_bulkhead
+    dropout_prob: 0.30
