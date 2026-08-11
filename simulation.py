@@ -1,6 +1,7 @@
 import matplotlib.pyplot as plt
 from network import Network, AccessPoint, Receiver
 from environment import ShipEnvironment
+from random import Random
 
 
 def display_network(network: Network) -> None:
@@ -28,7 +29,6 @@ def display_network(network: Network) -> None:
 
         ax.plot(x, y, color="black", linewidth=3)
 
-    ax.set_title("Ship Layout")
     ax.set_xlabel("X position (m)")
     ax.set_ylabel("Y position (m)")
     ax.set_aspect("equal")
@@ -54,10 +54,18 @@ def display_network(network: Network) -> None:
 
     plt.show()
 
-
+rng = Random(12345)
 environment = ShipEnvironment.from_config("layouts/simple_layout2.yaml")
 ap = AccessPoint("Router", "24:2f:d0:fb:85:b9", (4.5, 1.5, 1.5), 2412)
 re1 = Receiver("Phone-Desk", (3, 5.9, 0.7))
-re2 = Receiver("Phone-EngineRoom", (2, 1, 1))
-network = Network(environment, [ap], [re1, re2])
+re2 = Receiver("Phone-Engine", (2, 1, 1))
+network = Network.from_config("layouts/simple_layout2.yaml", access_points=[ap], receivers=[re1, re2])
+
+print("Phone-Desk to Router RSSI")
+for i in range(10):
+    print(network.rssi(ap, re1, rng))
+print("\nPhone-Engine to Router RSSI")
+for i in range(10):
+    print(network.rssi(ap, re2, rng))
+
 display_network(network)

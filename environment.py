@@ -18,6 +18,7 @@ class Wall:
     p2: Coord
     material: str = "steel_bulkhead"
     dropout_prob: float = 0.05 # Probability AP fails to produce a reading when this wall is crossed (more for steel than wood)
+    attenuation_db: float = 15.0 # Signal loss in db for readings that get through
 
     @property
     def geometry(self) -> LineString:
@@ -33,6 +34,8 @@ class Compartment:
     @property
     def geometry(self) -> Polygon:
         return Polygon(self.boundary)
+    
+    
 
 class EnvironmentConfigError(ValueError):
     """Raised when a ship environment configuration is invalid."""
@@ -88,6 +91,7 @@ class ShipEnvironment:
 
         return cls.from_dict(config)
 
+
     @classmethod
     def from_dict(
         cls,
@@ -115,11 +119,8 @@ class ShipEnvironment:
 
         for index, item in enumerate(compartment_data):
             location = f"compartments[{index}]"
-
             if not isinstance(item, Mapping):
-                raise EnvironmentConfigError(
-                    f"{location} must be a mapping"
-                )
+                raise EnvironmentConfigError(f"{location} must be a mapping")
 
             name = item.get("name")
             if not isinstance(name, str) or not name.strip():
@@ -128,18 +129,12 @@ class ShipEnvironment:
                 )
 
             name = name.strip()
-
             if name in compartment_names:
-                raise EnvironmentConfigError(
-                    f"Duplicate compartment name: {name}"
-                )
+                raise EnvironmentConfigError(f"Duplicate compartment name: {name}")
 
             raw_boundary = item.get("boundary")
-
             if not isinstance(raw_boundary, list) or len(raw_boundary) < 3:
-                raise EnvironmentConfigError(
-                    f"{location}.boundary must contain at least three points"
-                )
+                raise EnvironmentConfigError(f"{location}.boundary must contain at least three points")
 
             boundary = [
                 parse_coord(point, f"{location}.boundary[{point_index}]")
@@ -147,11 +142,8 @@ class ShipEnvironment:
             ]
 
             deck = item.get("deck", "main")
-
             if not isinstance(deck, str) or not deck.strip():
-                raise EnvironmentConfigError(
-                    f"{location}.deck must be a non-empty string"
-                )
+                raise EnvironmentConfigError(f"{location}.deck must be a non-empty string")
 
             compartment = Compartment(
                 name=name,
@@ -160,7 +152,6 @@ class ShipEnvironment:
             )
 
             polygon = compartment.geometry
-
             if polygon.is_empty or polygon.area == 0:
                 raise EnvironmentConfigError(
                     f"Compartment '{name}' has a zero-area boundary. \
@@ -175,6 +166,7 @@ class ShipEnvironment:
 
             compartments.append(compartment)
             compartment_names.add(name)
+
 
         wall_names: set[str] = set()
 
@@ -203,12 +195,9 @@ class ShipEnvironment:
             p2 = parse_coord(item.get("p2"), f"{location}.p2")
 
             if p1 == p2:
-                raise EnvironmentConfigError(
-                    f"Wall '{name}' cannot have identical endpoints"
-                )
+                raise EnvironmentConfigError(f"Wall '{name}' cannot have identical endpoints")
 
             material = item.get("material", "steel_bulkhead")
-
             if not isinstance(material, str) or not material.strip():
                 raise EnvironmentConfigError(
                     f"{location}.material must be a non-empty string"
@@ -228,6 +217,20 @@ class ShipEnvironment:
                     f"{location}.dropout_prob must be between 0 and 1"
                 )
 
+            raw_attenuation = item.get("attenuation_db", 15.0)
+
+            try:
+                attenuation_db = float(raw_attenuation)
+            except (TypeError, ValueError) as exc:
+                raise EnvironmentConfigError(
+                    f"{location}.attenuation_db must be a number"
+                ) from exc
+
+            if attenuation_db < 0:
+                raise EnvironmentConfigError(
+                    f"{location}.attenuation_db must be non-negative"
+                )
+
             walls.append(
                 Wall(
                     name=name,
@@ -235,6 +238,7 @@ class ShipEnvironment:
                     p2=p2,
                     material=material.strip(),
                     dropout_prob=dropout_prob,
+                    attenuation_db=attenuation_db,
                 )
             )
 
