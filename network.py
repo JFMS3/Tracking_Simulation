@@ -10,7 +10,7 @@ from environment import ShipEnvironment, Wall
 Coord3D = Tuple[float, float, float]
 
 
-@dataclass
+@dataclass(unsafe_hash=True)
 class AccessPoint:
     """A WiFi access point: identity, fixed position, and broadcast frequency."""
     name: str
@@ -41,6 +41,9 @@ class Reading:
     tx_mbps: float
     rx_mbps: float
     rtt_ms: float
+
+
+Scan = dict["AccessPoint", Optional[Reading]]
 
 
 @dataclass
@@ -95,12 +98,18 @@ class Network:
         reading += rng.gauss(0, self.shadowing_std_db)
         return round(reading, 1)
 
+
+    def scan(self, receiver: Receiver, rng: Random):
+        return {ap: self.reading(ap, receiver, rng) for ap in self.access_points}
+
+
     def link_speed(self, rssi_dbm: float) -> float:
-        """Rate-adaptation lookup: RSSI (dBm) -> PHY rate (Mbps)."""
+        """Look up RSSI from rate table"""
         for threshold, rate in self._RATE_TABLE:
             if rssi_dbm >= threshold:
                 return rate
         return 0.0
+
 
     def rtt(self, rssi_dbm: float, rng: Random) -> float:
         """Round-trip latency in ms: base + jitter, worse on a weak link."""
@@ -108,6 +117,7 @@ class Network:
         if rssi_dbm < self.rtt_weak_signal_threshold_dbm:
             latency += self.rtt_weak_signal_penalty_ms
         return round(max(latency, 1.0), 2)
+
 
     def reading(self, ap: AccessPoint, receiver: Receiver, rng: Random) -> Optional[Reading]:
         """One simulated measurement, or None if the AP produced no reading at all."""
@@ -125,6 +135,7 @@ class Network:
             rx_mbps=link_speed_mbps,
             rtt_ms=self.rtt(rssi_dbm, rng),
         )
+
 
     @classmethod
     def from_config(
