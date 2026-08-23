@@ -6,7 +6,7 @@ import numpy as np
 
 from network import Network, AccessPoint, Receiver
 from environment import ShipEnvironment
-from positioning import NearestAPLocaliser, WeightedCentroidLocaliser, TrilaterationLocaliser
+from positioning import NearestAPLocaliser, WeightedCentroidLocaliser, RSSTrilaterationLocaliser, RTTTrilaterationLocaliser
 
 
 def display_network(network: Network) -> None:
@@ -162,13 +162,15 @@ network = Network.from_config(
 nearest_ap_localiser = NearestAPLocaliser()
 weighted_distance_localiser = WeightedCentroidLocaliser(network, weight_mode="distance")
 weighted_power_localiser = WeightedCentroidLocaliser(network, weight_mode="linear_power")
-trilateration_localiser = TrilaterationLocaliser(network)
+rss_trilateration_localiser = RSSTrilaterationLocaliser(network)
+rtt_trilateration_localiser = RTTTrilaterationLocaliser(network)
 
 localisers = {
     "NearestAP": nearest_ap_localiser,
     "WeightedCentroid(dist)": weighted_distance_localiser,
     "WeightedCentroid(power)": weighted_power_localiser,
-    "Trilateration": trilateration_localiser,
+    "RSS Trilateration": rss_trilateration_localiser,
+    "RTT": rtt_trilateration_localiser,
 }
 
 

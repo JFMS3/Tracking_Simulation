@@ -3,7 +3,7 @@ from typing import Optional, Protocol
 
 import numpy as np
 from environment import Coord
-from network import AccessPoint, Network, Scan
+from network import AccessPoint, Network, Scan, Reading, SPEED_OF_LIGHT
 from scipy.optimize import least_squares
 
 
@@ -45,7 +45,7 @@ class NearestAPLocaliser:
  
  
 class WeightedCentroidLocaliser:
-    """Weighted average of AP positions, weighted by estimated proximity."""
+    """Average positions of APs we hear, but weight stronger signals higher"""
     def __init__(self, network: Network, weight_mode: str = "distance"):
         if weight_mode not in ("distance", "linear_power"):
             raise ValueError(f"Unknown weight_mode: {weight_mode}")
@@ -92,7 +92,7 @@ class WeightedCentroidLocaliser:
         total_weight: float,
         centre: Coord,
     ) -> np.ndarray:
-
+        """Calculates covariance based on how spread the voting APs are"""
         cx, cy = centre
         cov = np.zeros((2, 2))
         for ap, w in weights.items():
@@ -103,26 +103,20 @@ class WeightedCentroidLocaliser:
         return cov
 
 
-class TrilaterationLocaliser:
-    """Estimate position by nonlinear least-squares fit to RSSI-derived ranges."""
-    def __init__(self, network: Network, min_aps: int = 3, robust: bool = False, f_scale_m: float = 1.5):
-        self.reference_rssi_dbm = network.reference_rssi_dbm
-        self.reference_distance_m = network.reference_distance_m
-        self.path_loss_exponent = network.path_loss_exponent
+class _TrilaterationLocaliserBase:
+    """Inherited by RSS and RTT Trilateration localisers"""
+    def __init__(
+        self,
+        network: Network,
+        min_aps: int = 3,
+        robust: bool = False,
+        f_scale_m: float = 1.5,
+    ):
         self.min_aps = min_aps
         self.robust = robust
         self.f_scale_m = f_scale_m
-
         self.bounds = self._environment_bounds(network)
-
-    def _distance_estimate(self, rssi_dbm: float) -> float:
-        return rssi_to_distance(
-            rssi_dbm,
-            self.reference_rssi_dbm,
-            self.reference_distance_m,
-            self.path_loss_exponent,
-        )
-
+ 
     @staticmethod
     def _environment_bounds(network: Network) -> tuple[np.ndarray, np.ndarray]:
         all_bounds = [c.geometry.bounds for c in network.environment.compartments]
@@ -133,49 +127,109 @@ class TrilaterationLocaliser:
         maxx = max(b[2] for b in all_bounds)
         maxy = max(b[3] for b in all_bounds)
         return np.array([minx, miny]), np.array([maxx, maxy])
-
-
+ 
+    def _distance_estimate(self, reading: Reading) -> float:
+        raise NotImplementedError
+ 
     def locate(self, scan: Scan) -> Optional[LocalisationEstimate]:
         valid = {ap: reading for ap, reading in scan.items() if reading is not None}
         if len(valid) < self.min_aps:
             return None
-
+        
         aps = list(valid.keys())
         ap_positions = np.array([ap.xy for ap in aps])
-        ranges = np.array([self._distance_estimate(valid[ap].rssi_dbm) for ap in aps])
-
+        ranges = np.array([self._distance_estimate(valid[ap]) for ap in aps])
+ 
         def residuals(point: np.ndarray) -> np.ndarray:
             return np.linalg.norm(ap_positions - point, axis=1) - ranges
 
-        initial_guess = np.clip(ap_positions.mean(axis=0), *self.bounds) # start with initial positions of aps as guess
+        initial_guess = np.clip(ap_positions.mean(axis=0), *self.bounds)
         solver_kwargs = {"bounds": self.bounds}
         if self.robust:
-            solver_kwargs['loss'] = 'soft_l1'
-            solver_kwargs['f_scale'] = self.f_scale_m
-
+            solver_kwargs["loss"] = "soft_l1"
+            solver_kwargs["f_scale"] = self.f_scale_m
+ 
         result = least_squares(residuals, initial_guess, **solver_kwargs)
-
         position = (float(result.x[0]), float(result.x[1]))
         covariance = self._covariance_estimate(result, n_obs=len(aps))
-
+ 
         return LocalisationEstimate(
             position=position,
             covariance=covariance,
             num_aps_used=len(aps),
         )
-
+ 
     def _covariance_estimate(self, result, n_obs: int) -> Optional[np.ndarray]:
-        """Linearised (Gauss-Newton) covariance: residual_variance * inv(J'*J)
-        Reflects how sensitive the fitted position is to actual range residuals
-        """
         n_params = 2  # x, y
         degrees_of_freedom = n_obs - n_params
         if degrees_of_freedom <= 0:
             return None
-
+ 
         residual_variance = float(np.sum(result.fun ** 2) / degrees_of_freedom)
         jtj = result.jac.T @ result.jac
         try:
             return residual_variance * np.linalg.inv(jtj)
         except np.linalg.LinAlgError:
             return None
+ 
+ 
+class RSSTrilaterationLocaliser(_TrilaterationLocaliserBase):
+    """Estimate position by nonlinear least-squares fit to RSSI-derived ranges.
+ 
+    Unlike WeightedCentroid, this actually models the geometry: each AP's
+    RSSI is converted to a range estimate, and we solve for the (x, y) that
+    best satisfies "distance from AP_i should equal range_i" across all APs.
+ 
+    Weakness (see RTTTrilaterationLocaliser below): the RSSI -> distance
+    conversion assumes free-space path loss, so it's systematically wrong
+    whenever a wall was actually crossed -- the missing dB reads as extra
+    distance, not as attenuation.
+    """
+ 
+    def __init__(
+        self,
+        network: Network,
+        min_aps: int = 3,
+        robust: bool = False,
+        f_scale_m: float = 1.5,
+    ):
+        super().__init__(network, min_aps=min_aps, robust=robust, f_scale_m=f_scale_m)
+        self.reference_rssi_dbm = network.reference_rssi_dbm
+        self.reference_distance_m = network.reference_distance_m
+        self.path_loss_exponent = network.path_loss_exponent
+ 
+    def _distance_estimate(self, reading: Reading) -> float:
+        return rssi_to_distance(
+            reading.rssi_dbm,
+            self.reference_rssi_dbm,
+            self.reference_distance_m,
+            self.path_loss_exponent,
+        )
+ 
+ 
+class RTTTrilaterationLocaliser(_TrilaterationLocaliserBase):
+    """Estimate position by nonlinear least-squares fit to RTT-derived ranges.
+ 
+    RTT (round-trip time, e.g. 802.11mc/WiFi FTM) converts to distance via
+    pure physics -- speed of light -- rather than a fitted path-loss model.
+    That means it has no equivalent of RSS trilateration's wall-attenuation
+    bias: a wall doesn't change how long light takes to travel, only how
+    much of it arrives. This is why RTT is the range source real indoor
+    positioning systems actually use for trilateration, and RSS is mostly
+    reserved for fingerprinting/weighted-average methods instead.
+    """
+ 
+    def __init__(
+        self,
+        network: Network,
+        min_aps: int = 3,
+        robust: bool = False,
+        f_scale_m: float = 1.5,
+    ):
+        super().__init__(network, min_aps=min_aps, robust=robust, f_scale_m=f_scale_m)
+        self.rtt_base_ms = network.rtt_base_ms
+ 
+    def _distance_estimate(self, reading: Reading) -> float:
+        time_of_flight_ms = max(reading.rtt_ms - self.rtt_base_ms, 0.0)
+        time_of_flight_s = time_of_flight_ms / 1000.0
+        return (SPEED_OF_LIGHT * time_of_flight_s) / 2
