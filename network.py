@@ -8,9 +8,10 @@ from typing import List, Optional, Tuple
 from environment import ShipEnvironment, Wall
 
 Coord3D = Tuple[float, float, float]
+SPEED_OF_LIGHT = 299_792_458.0
 
 
-@dataclass
+@dataclass(unsafe_hash=True)
 class AccessPoint:
     """A WiFi access point: identity, fixed position, and broadcast frequency."""
     name: str
@@ -43,6 +44,9 @@ class Reading:
     rtt_ms: float
 
 
+Scan = dict["AccessPoint", Optional[Reading]]
+
+
 @dataclass
 class Network:
     '''The main layer containing the environment and network infrastructure'''
@@ -56,9 +60,9 @@ class Network:
     shadowing_std_db: float = 3.0
 
     rtt_base_ms: float = 8.0
-    rtt_jitter_std_ms: float = 2.0
+    rtt_ranging_noise_m: float = 0.3
     rtt_weak_signal_threshold_dbm: float = -75.0
-    rtt_weak_signal_penalty_ms: float = 15.0
+    rtt_weak_signal_penalty_m: float = 2.0
 
     # WiFi picks from discrete menu of coding schemes based on how clean the signal is
     # These ones are the WiFi4 PHY rates for a 20MHz channel
@@ -75,6 +79,12 @@ class Network:
 
     def walls_between(self, ap: AccessPoint, receiver: Receiver) -> List[Wall]:
         return self.environment.walls_crossed(ap.xy, receiver.xy)
+
+    def _distance(self, ap: AccessPoint, receiver: Receiver) -> float:
+            dx = ap.position[0] - receiver.position[0]
+            dy = ap.position[1] - receiver.position[1]
+            dz = ap.position[2] - receiver.position[2]
+            return max(math.sqrt(dx * dx + dy * dy + dz * dz), 0.1)
 
     def rssi(self, ap: AccessPoint, receiver: Receiver, rng: Random) -> Optional[float]:
         """Simulate an RSSI reading in dBm, or None if the AP fails to produce one."""
@@ -95,19 +105,26 @@ class Network:
         reading += rng.gauss(0, self.shadowing_std_db)
         return round(reading, 1)
 
+
+    def rtt(self, distance: float, rssi: float, rng: Random) -> float:
+        noise_m = rng.gauss(0, self.rtt_ranging_noise_m)
+        bias_m = self.rtt_weak_signal_penalty_m if rssi < self.rtt_weak_signal_threshold_dbm else 0.0
+        apparent_distance = max(distance + noise_m + bias_m, 0.05)
+        time_of_flight_ms = (2 * apparent_distance / SPEED_OF_LIGHT) * 1000
+        return round(self.rtt_base_ms + time_of_flight_ms, 6)
+
+
+    def scan(self, receiver: Receiver, rng: Random):
+        return {ap: self.reading(ap, receiver, rng) for ap in self.access_points}
+
+
     def link_speed(self, rssi_dbm: float) -> float:
-        """Rate-adaptation lookup: RSSI (dBm) -> PHY rate (Mbps)."""
+        """Look up RSSI from rate table"""
         for threshold, rate in self._RATE_TABLE:
             if rssi_dbm >= threshold:
                 return rate
         return 0.0
 
-    def rtt(self, rssi_dbm: float, rng: Random) -> float:
-        """Round-trip latency in ms: base + jitter, worse on a weak link."""
-        latency = rng.gauss(self.rtt_base_ms, self.rtt_jitter_std_ms)
-        if rssi_dbm < self.rtt_weak_signal_threshold_dbm:
-            latency += self.rtt_weak_signal_penalty_ms
-        return round(max(latency, 1.0), 2)
 
     def reading(self, ap: AccessPoint, receiver: Receiver, rng: Random) -> Optional[Reading]:
         """One simulated measurement, or None if the AP produced no reading at all."""
@@ -117,14 +134,16 @@ class Network:
             return None
 
         link_speed_mbps = self.link_speed(rssi_dbm)
+        distance = self._distance(ap, receiver)
 
         return Reading(
             rssi_dbm=rssi_dbm,
             link_speed_mbps=link_speed_mbps,
             tx_mbps=link_speed_mbps,
             rx_mbps=link_speed_mbps,
-            rtt_ms=self.rtt(rssi_dbm, rng),
+            rtt_ms=self.rtt(distance, rssi_dbm, rng),
         )
+
 
     @classmethod
     def from_config(
