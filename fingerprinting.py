@@ -84,7 +84,8 @@ def build_radio_map(
 
 
 class FingerprintLocaliser:
-    """Estimates position using distance weighted average of k nearest fingerprints"""
+    """Estimates position by first building an RSSI vector for every AP. Signal space distance is measured
+    to every calibration point and return average position of k nearest calibration points"""
 
     def __init__(
         self,

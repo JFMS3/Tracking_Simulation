@@ -8,7 +8,7 @@ import numpy as np
 from network import Network, AccessPoint, Receiver
 from environment import ShipEnvironment
 from positioning import NearestAPLocaliser, WeightedCentroidLocaliser, RSSTrilaterationLocaliser, RTTTrilaterationLocaliser
-from fingerprinting import FingerprintEntry, build_radio_map
+from fingerprinting import FingerprintEntry, build_radio_map, FingerprintLocaliser, FingerprintCompartmentLocaliser
 from typing import List, Optional, Sequence
 
 Metric = str
@@ -291,11 +291,16 @@ network = Network.from_config(
     "layouts/simple_layout2.yaml", access_points=[ap1, ap2, ap3, ap4, ap5], receivers=[re1, re2]
 )
 
+ap_order = network.access_points
+radio_map = build_radio_map(network, rng, ap_order, grid_spacing_m=0.3, samples_per_point=15)
+
 nearest_ap_localiser = NearestAPLocaliser()
 weighted_distance_localiser = WeightedCentroidLocaliser(network, weight_mode="distance")
 weighted_power_localiser = WeightedCentroidLocaliser(network, weight_mode="linear_power")
 rss_trilateration_localiser = RSSTrilaterationLocaliser(network)
 rtt_trilateration_localiser = RTTTrilaterationLocaliser(network)
+fingerprint_localiser = FingerprintLocaliser(radio_map, ap_order, k=3)
+
 
 localisers = {
     "NearestAP": nearest_ap_localiser,
@@ -303,6 +308,7 @@ localisers = {
     "WeightedCentroid(power)": weighted_power_localiser,
     "RSS Trilateration": rss_trilateration_localiser,
     "RTT": rtt_trilateration_localiser,
+    "Fingerprint": fingerprint_localiser
 }
 
 
@@ -310,13 +316,14 @@ def get_coordinate_guess(re):
     scan = network.scan(re, rng)
     nearest_ap_location = nearest_ap_localiser.locate(scan).position
     weighted_power_location = weighted_power_localiser.locate(scan).position
-    coords = [nearest_ap_location, weighted_power_location]
-    weights = [0.1, 0.4]
+    fingerprint_location = fingerprint_localiser.locate(scan).position
+    coords = [nearest_ap_location, weighted_power_location, fingerprint_location]
+    weights = [0.1, 0.3, 0.6]
 
     rtt_estimate = rtt_trilateration_localiser.locate(scan)
     if rtt_estimate is not None:
         coords.append(rtt_estimate.position)
-        weights.append(0.5)
+        weights = [0.1, 0.2, 0.4, 0.3]
     return tuple(np.average(coords, axis=0, weights=weights))
 
 
@@ -333,9 +340,5 @@ report_ap_coverage(network, rng)
 report_localiser_stats(localisers, network, rng)
 report_compartment_breakdown(localisers, network, rng)
 
-ap_order = network.access_points
-radio_map = build_radio_map(network, rng, ap_order, grid_spacing_m=0.3, samples_per_point=15)
 plot_fingerprint_heatmap(network, radio_map, ap_order, metric="best_signal", layout="overlay")
 plot_fingerprint_heatmap(network, radio_map, ap_order, metric="coverage", layout="side")
-
-display_network(network)
