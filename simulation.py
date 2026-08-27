@@ -2,12 +2,16 @@ import math
 from random import Random
 
 import matplotlib.pyplot as plt
+import matplotlib.patheffects as pe
 import numpy as np
 
 from network import Network, AccessPoint, Receiver
 from environment import ShipEnvironment
 from positioning import NearestAPLocaliser, WeightedCentroidLocaliser, RSSTrilaterationLocaliser, RTTTrilaterationLocaliser
+from fingerprinting import FingerprintEntry, build_radio_map
+from typing import List, Optional, Sequence
 
+Metric = str
 
 def display_network(network: Network) -> None:
     environment = network.environment
@@ -145,6 +149,134 @@ def report_compartment_breakdown(
     print()
 
 
+
+
+ 
+def _heatmap_values(
+    radio_map: List[FingerprintEntry],
+    ap_order: Sequence[AccessPoint],
+    metric: Metric,
+    ap_name: Optional[str],
+    coverage_threshold_dbm: float,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, str]:
+    xs = np.array([e.position[0] for e in radio_map])
+    ys = np.array([e.position[1] for e in radio_map])
+ 
+    if metric == "best_signal":
+        vals = np.array([e.rssi_vector.max() for e in radio_map])
+        label = "Strongest RSSI heard (dBm)"
+ 
+    elif metric == "coverage":
+        vals = np.array([(e.rssi_vector > coverage_threshold_dbm).sum() for e in radio_map])
+        label = f"# APs heard above {coverage_threshold_dbm:.0f} dBm"
+ 
+    elif metric == "ap_signal":
+        if ap_name is None:
+            raise ValueError("ap_name is required when metric='ap_signal'")
+        names = [ap.name for ap in ap_order]
+        if ap_name not in names:
+            raise ValueError(f"Unknown AP name: {ap_name!r}. Known: {names}")
+        idx = names.index(ap_name)
+        vals = np.array([e.rssi_vector[idx] for e in radio_map])
+        label = f"{ap_name} RSSI (dBm)"
+ 
+    else:
+        raise ValueError(f"Unknown metric: {metric!r}")
+ 
+    return xs, ys, vals, label
+ 
+ 
+def _draw_layout(ax, network: Network, fill_compartments: bool = True) -> None:
+    """Draw compartments, walls, APs and receivers onto an existing axis."""
+    environment = network.environment
+ 
+    for compartment in environment.compartments:
+        polygon = compartment.geometry
+        x, y = polygon.exterior.xy
+ 
+        if fill_compartments:
+            ax.fill(x, y, alpha=0.25, edgecolor="black")
+        else:
+            ax.plot(x, y, color="black", linewidth=1, linestyle="--")
+ 
+        centre = polygon.centroid
+        ax.text(
+            centre.x, centre.y, compartment.name,
+            horizontalalignment="center", verticalalignment="center",
+            fontsize=8,
+            bbox=dict(boxstyle="round,pad=0.15", facecolor="white", alpha=0.6, edgecolor="none"),
+        )
+ 
+    for wall in environment.walls:
+        x, y = wall.geometry.xy
+        ax.plot(x, y, color="black", linewidth=3)
+ 
+    for ap in network.access_points:
+        ax.scatter(*ap.xy, marker="*", s=250, color="crimson", zorder=5, edgecolor="white", linewidth=0.5)
+        ax.annotate(
+            ap.name, ap.xy,
+            xytext=(0, 8), textcoords="offset points",
+            horizontalalignment="center", fontsize=8,
+            color="white", weight="bold",
+            path_effects=[pe.withStroke(linewidth=2.5, foreground="black")],
+        )
+ 
+    for receiver in network.receivers:
+        ax.scatter(*receiver.xy, marker="o", color="royalblue", zorder=5, edgecolor="white", linewidth=0.5)
+        ax.annotate(
+            receiver.name, receiver.xy,
+            xytext=(0, 8), textcoords="offset points",
+            horizontalalignment="center", fontsize=8,
+            color="white", weight="bold",
+            path_effects=[pe.withStroke(linewidth=2.5, foreground="black")],
+        )
+ 
+    ax.set_xlabel("X position (m)")
+    ax.set_ylabel("Y position (m)")
+    ax.set_aspect("equal")
+ 
+ 
+def plot_fingerprint_heatmap(
+    network: Network,
+    radio_map: List[FingerprintEntry],
+    ap_order: Sequence[AccessPoint],
+    metric: Metric = "best_signal",
+    ap_name: Optional[str] = None,
+    layout: str = "overlay",
+    coverage_threshold_dbm: float = -75.0,
+    cmap: str = "viridis",
+    show: bool = True,
+):
+    xs, ys, vals, label = _heatmap_values(radio_map, ap_order, metric, ap_name, coverage_threshold_dbm)
+ 
+    if layout == "overlay":
+        fig, ax = plt.subplots(figsize=(8, 7))
+        tpc = ax.tricontourf(xs, ys, vals, levels=20, cmap=cmap)
+        fig.colorbar(tpc, ax=ax, label=label)
+        _draw_layout(ax, network, fill_compartments=False)
+        ax.set_title(f"Fingerprint heatmap — {label}")
+ 
+    elif layout == "side":
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6.5))
+        _draw_layout(ax1, network, fill_compartments=True)
+        ax1.set_title("Ship layout")
+ 
+        tpc = ax2.tricontourf(xs, ys, vals, levels=20, cmap=cmap)
+        fig.colorbar(tpc, ax=ax2, label=label)
+        _draw_layout(ax2, network, fill_compartments=False)
+        ax2.set_title(f"Fingerprint heatmap — {label}")
+ 
+    else:
+        raise ValueError(f"Unknown layout: {layout!r}. Use 'overlay' or 'side'.")
+ 
+    plt.tight_layout()
+    if show:
+        plt.show()
+    return fig
+ 
+
+
+
 rng = Random(12345)
 environment = ShipEnvironment.from_config("layouts/simple_layout2.yaml")
 ap1 = AccessPoint("Router1", "24:2f:d0:fb:85:b9", (4.5, 1.5, 1.5), 2412)
@@ -177,12 +309,15 @@ localisers = {
 def get_coordinate_guess(re):
     scan = network.scan(re, rng)
     nearest_ap_location = nearest_ap_localiser.locate(scan).position
-    weighted_distance_location = weighted_distance_localiser.locate(scan).position
     weighted_power_location = weighted_power_localiser.locate(scan).position
+    coords = [nearest_ap_location, weighted_power_location]
+    weights = [0.1, 0.4]
 
-    coords = [nearest_ap_location, weighted_distance_location, weighted_power_location]
-    weighted_coordinate_guess = tuple(np.average(coords, axis=0, weights=[0.1, 0.4, 0.5]))
-    return weighted_coordinate_guess
+    rtt_estimate = rtt_trilateration_localiser.locate(scan)
+    if rtt_estimate is not None:
+        coords.append(rtt_estimate.position)
+        weights.append(0.5)
+    return tuple(np.average(coords, axis=0, weights=weights))
 
 
 for i in range(10):
@@ -197,5 +332,10 @@ for i in range(10):
 report_ap_coverage(network, rng)
 report_localiser_stats(localisers, network, rng)
 report_compartment_breakdown(localisers, network, rng)
+
+ap_order = network.access_points
+radio_map = build_radio_map(network, rng, ap_order, grid_spacing_m=0.3, samples_per_point=15)
+plot_fingerprint_heatmap(network, radio_map, ap_order, metric="best_signal", layout="overlay")
+plot_fingerprint_heatmap(network, radio_map, ap_order, metric="coverage", layout="side")
 
 display_network(network)
