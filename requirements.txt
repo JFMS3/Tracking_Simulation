@@ -1,3 +1,5 @@
 shapely
 PyYAML
 matplotlib
+numpy
+scipy

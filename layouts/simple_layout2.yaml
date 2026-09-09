@@ -45,75 +45,91 @@ walls:
     p1: [0, 0]
     p2: [0, 7]
     material: steel_bulkhead
-    dropout_prob: 0.30
-    attenuation_db: 15.0
+    attenuation_db: 20.0
 
   - name: Right Major
     p1: [10, 0]
     p2: [10, 7]
     material: steel_bulkhead
-    dropout_prob: 0.30
-    attenuation_db: 15.0
+    attenuation_db: 20.0
 
   - name: Bottom Major
     p1: [0, 0]
     p2: [10, 0]
     material: steel_bulkhead
-    dropout_prob: 0.30
-    attenuation_db: 15.0
+    attenuation_db: 20.0
 
   - name: Top Major
     p1: [2, 7]
     p2: [8, 7]
     material: steel_bulkhead
-    dropout_prob: 0.30
-    attenuation_db: 15.0
+    attenuation_db: 20.0
 
   - name: Guest A Window
     p1: [0, 7]
     p2: [1, 7]
     material: steel_bulkhead
-    dropout_prob: 0.30
-    attenuation_db: 15.0
+    attenuation_db: 20.0
 
   - name: Guest B Window
     p1: [9, 7]
     p2: [10, 7]
     material: steel_bulkhead
-    dropout_prob: 0.30
-    attenuation_db: 15.0
+    attenuation_db: 20.0
 
   - name: Middle Seperator
     p1: [0, 4]
     p2: [10, 4]
     material: steel_bulkhead
-    dropout_prob: 0.30
-    attenuation_db: 15.0
+    attenuation_db: 20.0
 
   - name: Guest Room A Right
     p1: [4, 4]
     p2: [4, 7]
     material: steel_bulkhead
-    dropout_prob: 0.30
-    attenuation_db: 15.0
+    attenuation_db: 20.0
 
   - name: Laundry Right
     p1: [6, 4]
     p2: [6, 7]
     material: steel_bulkhead
-    dropout_prob: 0.30
-    attenuation_db: 15.0
+    attenuation_db: 20.0
 
   - name: Engine Room Right
     p1: [6, 0]
     p2: [6, 4]
     material: steel_bulkhead
-    dropout_prob: 0.30
-    attenuation_db: 15.0
+    attenuation_db: 20.0
 
 
 propagation:
   reference_rssi_dbm: -38.0
   reference_distance_m: 1.0
-  path_loss_exponent: 2.7
-  shadowing_std_db: 3.5
+  # Provisional shipboard defaults; calibrate these from measurements aboard
+  # the target vessel. See the propagation-model notes in README.md.
+  path_loss_exponent: 2.15
+  shadowing_std_db: 2.0
+  shadowing_correlation_distance_m: 2.0
+  shadowing_components: 96
+  shadowing_seed: 12345
+  fast_fading_samples: 8
+  measurement_noise_std_db: 0.75
+  rssi_quantization_db: 1.0
+
+  channel_bandwidth_mhz: 20.0
+  receiver_noise_figure_db: 7.0
+  noise_floor_variation_std_db: 0.5
+  interference_burst_start_probability: 0.02
+  interference_burst_end_probability: 0.35
+  interference_burst_mean_rise_db: 8.0
+  detection_snr_midpoint_db: 6.0
+  detection_snr_transition_db: 1.5
+  beacons_per_scan: 3
+  legacy_wall_dropout: false
+
+  rtt_ranging_noise_m: 0.5
+  rtt_nlos_bias_per_wall_m: 1.0
+  rtt_nlos_noise_per_wall_m: 0.5
+  rtt_outlier_probability: 0.01
+  rtt_nlos_outlier_probability: 0.08
+  rtt_outlier_mean_m: 2.0

@@ -1,4 +1,5 @@
 import math
+from pathlib import Path
 from random import Random
 
 import matplotlib.pyplot as plt
@@ -91,27 +92,31 @@ def report_localiser_stats(
     header = f"{'Method':<24}{'Mean err':<10}{'Median err':<12}{'P90 err':<10}{'Miss rate':<11}{'Compartment acc':<16}"
     print(header)
 
+    # Every method must see the same locations and the same stochastic scans;
+    # otherwise differences in fading/dropout are confounded with the method.
+    trials = []
+    for comp in environment.compartments:
+        for _ in range(n_trials_per_compartment):
+            true_pos = environment.random_point_in(comp.name, rng)
+            receiver = Receiver("probe", (*true_pos, 1.0))
+            trials.append((comp.name, true_pos, network.scan(receiver, rng)))
+
     for name, loc in localisers.items():
         errors = []
         misses = 0
         compartment_correct = 0
-        total = 0
+        total = len(trials)
 
-        for comp in environment.compartments:
-            for _ in range(n_trials_per_compartment):
-                true_pos = environment.random_point_in(comp.name, rng)
-                receiver = Receiver("probe", (*true_pos, 1.0))
-                scan = network.scan(receiver, rng)
-                estimate = loc.locate(scan)
-                total += 1
+        for compartment_name, true_pos, scan in trials:
+            estimate = loc.locate(scan)
 
-                if estimate is None:
-                    misses += 1
-                    continue
+            if estimate is None:
+                misses += 1
+                continue
 
-                errors.append(math.dist(true_pos, estimate.position))
-                if environment.compartment_at(estimate.position) == comp.name:
-                    compartment_correct += 1
+            errors.append(math.dist(true_pos, estimate.position))
+            if environment.compartment_at(estimate.position) == compartment_name:
+                compartment_correct += 1
 
         mean_err = sum(errors) / len(errors) if errors else float("nan")
         median_err = sorted(errors)[len(errors) // 2] if errors else float("nan")
@@ -134,13 +139,16 @@ def report_compartment_breakdown(
     print("=== Compartment classification accuracy, split by TRUE compartment ===")
     print(f"{'Compartment':<16}" + "".join(f"{name:<24}" for name in localisers))
     for comp in environment.compartments:
+        trials = []
+        for _ in range(n_trials_per_compartment):
+            true_pos = environment.random_point_in(comp.name, rng)
+            receiver = Receiver("probe", (*true_pos, 1.0))
+            trials.append(network.scan(receiver, rng))
+
         row = f"{comp.name:<16}"
         for name, loc in localisers.items():
             correct = 0
-            for _ in range(n_trials_per_compartment):
-                true_pos = environment.random_point_in(comp.name, rng)
-                receiver = Receiver("probe", (*true_pos, 1.0))
-                scan = network.scan(receiver, rng)
+            for scan in trials:
                 estimate = loc.locate(scan)
                 if estimate is not None and environment.compartment_at(estimate.position) == comp.name:
                     correct += 1
@@ -277,68 +285,114 @@ def plot_fingerprint_heatmap(
 
 
 
-rng = Random(12345)
-environment = ShipEnvironment.from_config("layouts/simple_layout2.yaml")
-ap1 = AccessPoint("Router1", "24:2f:d0:fb:85:b9", (4.5, 1.5, 1.5), 2412)
-ap2 = AccessPoint("Router2", "25:3f:d0:fb:85:c4", (1.5, 4.5, 1.0), 2412)
-ap3 = AccessPoint("Router3", "26:4f:d0:fb:85:c0", (8.0, 3.0, 0.5), 2412)
-ap4 = AccessPoint("Router4", "27:A0:d0:fb:85:c4", (5.0, 6.2, 1.0), 2412)
-ap5 = AccessPoint("Router5", "28:25:d0:fb:85:c0", (6.8, 4.5, 0.5), 2412)
-re1 = Receiver("Phone-Desk", (3, 5.9, 0.7))
-re2 = Receiver("Phone-Engine", (2, 1, 1))
+def main() -> None:
+    radio_map_rng = Random(12345)
+    demo_rng = Random(23456)
+    coverage_rng = Random(34567)
+    performance_rng = Random(45678)
+    breakdown_rng = Random(56789)
+    layout_path = Path(__file__).resolve().parent / "layouts" / "simple_layout2.yaml"
+    environment = ShipEnvironment.from_config(layout_path)
+    ap1 = AccessPoint("Router1", "24:2f:d0:fb:85:b9", (4.5, 1.5, 1.5), 2412)
+    ap2 = AccessPoint("Router2", "25:3f:d0:fb:85:c4", (1.5, 4.5, 1.0), 2412)
+    ap3 = AccessPoint("Router3", "26:4f:d0:fb:85:c0", (8.0, 3.0, 0.5), 2412)
+    ap4 = AccessPoint("Router4", "27:A0:d0:fb:85:c4", (5.0, 6.2, 1.0), 2412)
+    ap5 = AccessPoint("Router5", "28:25:d0:fb:85:c0", (6.8, 4.5, 0.5), 2412)
+    re1 = Receiver("Phone-Desk", (3, 5.9, 0.7))
+    re2 = Receiver("Phone-Engine", (2, 1, 1))
 
-network = Network.from_config(
-    "layouts/simple_layout2.yaml", access_points=[ap1, ap2, ap3, ap4, ap5], receivers=[re1, re2]
-)
+    network = Network.from_config(
+        layout_path,
+        access_points=[ap1, ap2, ap3, ap4, ap5],
+        receivers=[re1, re2],
+    )
 
-ap_order = network.access_points
-radio_map = build_radio_map(network, rng, ap_order, grid_spacing_m=0.3, samples_per_point=15)
+    ap_order = network.access_points
+    radio_map = build_radio_map(
+        network,
+        radio_map_rng,
+        ap_order,
+        grid_spacing_m=0.3,
+        samples_per_point=15,
+    )
 
-nearest_ap_localiser = NearestAPLocaliser()
-weighted_distance_localiser = WeightedCentroidLocaliser(network, weight_mode="distance")
-weighted_power_localiser = WeightedCentroidLocaliser(network, weight_mode="linear_power")
-rss_trilateration_localiser = RSSTrilaterationLocaliser(network)
-rtt_trilateration_localiser = RTTTrilaterationLocaliser(network)
-fingerprint_localiser = FingerprintLocaliser(radio_map, ap_order, k=3)
+    nearest_ap_localiser = NearestAPLocaliser()
+    weighted_distance_localiser = WeightedCentroidLocaliser(network, weight_mode="distance")
+    weighted_power_localiser = WeightedCentroidLocaliser(network, weight_mode="linear_power")
+    rss_trilateration_localiser = RSSTrilaterationLocaliser(network)
+    rtt_trilateration_localiser = RTTTrilaterationLocaliser(network)
+    fingerprint_localiser = FingerprintLocaliser(radio_map, ap_order, k=3)
+
+    localisers = {
+        "NearestAP": nearest_ap_localiser,
+        "WeightedCentroid(dist)": weighted_distance_localiser,
+        "WeightedCentroid(power)": weighted_power_localiser,
+        "RSS Trilateration": rss_trilateration_localiser,
+        "RTT": rtt_trilateration_localiser,
+        "Fingerprint": fingerprint_localiser,
+    }
+
+    def get_coordinate_guess(receiver: Receiver) -> Optional[tuple[float, float]]:
+        scan = network.scan(receiver, demo_rng)
+        nearest_ap_estimate = nearest_ap_localiser.locate(scan)
+        weighted_power_estimate = weighted_power_localiser.locate(scan)
+        fingerprint_estimate = fingerprint_localiser.locate(scan)
+        rtt_estimate = rtt_trilateration_localiser.locate(scan)
+
+        if rtt_estimate is not None:
+            weighted_estimates = [
+                (nearest_ap_estimate, 0.1),
+                (weighted_power_estimate, 0.2),
+                (fingerprint_estimate, 0.4),
+                (rtt_estimate, 0.3),
+            ]
+        else:
+            weighted_estimates = [
+                (nearest_ap_estimate, 0.1),
+                (weighted_power_estimate, 0.3),
+                (fingerprint_estimate, 0.6),
+            ]
+
+        available = [
+            (estimate.position, weight)
+            for estimate, weight in weighted_estimates
+            if estimate is not None
+        ]
+        if not available:
+            return None
+
+        coords, weights = zip(*available)
+        average = np.average(coords, axis=0, weights=weights)
+        return float(average[0]), float(average[1])
+
+    for i in range(10):
+        re1_coordinate_guess = get_coordinate_guess(re1)
+        re1_compartment_guess = (
+            environment.compartment_at(re1_coordinate_guess)
+            if re1_coordinate_guess is not None
+            else None
+        ) or "Unknown"
+        re2_coordinate_guess = get_coordinate_guess(re2)
+        re2_compartment_guess = (
+            environment.compartment_at(re2_coordinate_guess)
+            if re2_coordinate_guess is not None
+            else None
+        ) or "Unknown"
+        print(
+            f"Timestamp {i}: {re1.name} in {re1_compartment_guess} | "
+            f"{re2.name} in {re2_compartment_guess}"
+        )
+
+    network.reset_channel_state()
+    report_ap_coverage(network, coverage_rng)
+    network.reset_channel_state()
+    report_localiser_stats(localisers, network, performance_rng)
+    network.reset_channel_state()
+    report_compartment_breakdown(localisers, network, breakdown_rng)
+
+    plot_fingerprint_heatmap(network, radio_map, ap_order, metric="best_signal", layout="overlay")
+    plot_fingerprint_heatmap(network, radio_map, ap_order, metric="coverage", layout="side")
 
 
-localisers = {
-    "NearestAP": nearest_ap_localiser,
-    "WeightedCentroid(dist)": weighted_distance_localiser,
-    "WeightedCentroid(power)": weighted_power_localiser,
-    "RSS Trilateration": rss_trilateration_localiser,
-    "RTT": rtt_trilateration_localiser,
-    "Fingerprint": fingerprint_localiser
-}
-
-
-def get_coordinate_guess(re):
-    scan = network.scan(re, rng)
-    nearest_ap_location = nearest_ap_localiser.locate(scan).position
-    weighted_power_location = weighted_power_localiser.locate(scan).position
-    fingerprint_location = fingerprint_localiser.locate(scan).position
-    coords = [nearest_ap_location, weighted_power_location, fingerprint_location]
-    weights = [0.1, 0.3, 0.6]
-
-    rtt_estimate = rtt_trilateration_localiser.locate(scan)
-    if rtt_estimate is not None:
-        coords.append(rtt_estimate.position)
-        weights = [0.1, 0.2, 0.4, 0.3]
-    return tuple(np.average(coords, axis=0, weights=weights))
-
-
-for i in range(10):
-    re1_coordinate_guess = get_coordinate_guess(re1)
-    re1_compartment_guess = environment.compartment_at(re1_coordinate_guess)
-    re2_coordinate_guess = get_coordinate_guess(re2)
-    re2_compartment_guess = environment.compartment_at(re2_coordinate_guess)
-    print(f"Timestamp {i}: {re1.name} in {re1_compartment_guess} | {re2.name} in {re2_compartment_guess}")
-
-
-
-report_ap_coverage(network, rng)
-report_localiser_stats(localisers, network, rng)
-report_compartment_breakdown(localisers, network, rng)
-
-plot_fingerprint_heatmap(network, radio_map, ap_order, metric="best_signal", layout="overlay")
-plot_fingerprint_heatmap(network, radio_map, ap_order, metric="coverage", layout="side")
+if __name__ == "__main__":
+    main()

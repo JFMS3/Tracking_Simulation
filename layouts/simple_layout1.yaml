@@ -20,22 +20,18 @@ walls:
     p1: [0, 0]
     p2: [0, 4]
     material: steel_bulkhead
-    dropout_prob: 0.30
 
   - name: Engine-Machinery Bulkhead
     p1: [6, 0]
     p2: [6, 4]
     material: steel_bulkhead
-    dropout_prob: 0.40
 
   - name: Starboard Outer Bulkhead
     p1: [10, 0]
     p2: [10, 4]
     material: steel_bulkhead
-    dropout_prob: 0.30
 
   - name: Engine Room Base
     p1: [10, 0]
     p2: [10, 4]
     material: steel_bulkhead
-    dropout_prob: 0.30
