@@ -17,8 +17,10 @@ class Wall:
     p1: Coord
     p2: Coord
     material: str = "steel_bulkhead"
-    dropout_prob: float = 0.05 # Probability AP fails to produce a reading when this wall is crossed (more for steel than wood)
-    attenuation_db: float = 15.0 # Signal loss in db for readings that get through
+    # Retained only for opt-in legacy simulations. Normal reception failure is
+    # now derived from link SNR after applying the wall's attenuation.
+    dropout_prob: float = 0.0
+    attenuation_db: float = 20.0
 
     @property
     def geometry(self) -> LineString:
@@ -203,7 +205,7 @@ class ShipEnvironment:
                     f"{location}.material must be a non-empty string"
                 )
 
-            raw_dropout = item.get("dropout_prob", 0.05)
+            raw_dropout = item.get("dropout_prob", 0.0)
 
             try:
                 dropout_prob = float(raw_dropout)
@@ -217,7 +219,7 @@ class ShipEnvironment:
                     f"{location}.dropout_prob must be between 0 and 1"
                 )
 
-            raw_attenuation = item.get("attenuation_db", 15.0)
+            raw_attenuation = item.get("attenuation_db", 20.0)
 
             try:
                 attenuation_db = float(raw_attenuation)
