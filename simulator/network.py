@@ -9,27 +9,16 @@ from typing import ClassVar, List, Mapping, Optional, Tuple
 
 import yaml
 
-from environment import ShipEnvironment, Wall
+from crew_tracking.ftm import FTMExchange, distance_m_to_rtt_ns
+from crew_tracking.models import (
+    AccessPoint, Coord3D, FTMBurst, FTMSample, Reading, Scan, SPEED_OF_LIGHT,
+)
+
+from .environment import ShipEnvironment, Wall
 
 
-Coord3D = Tuple[float, float, float]
-SPEED_OF_LIGHT = 299_792_458.0
 _BOLTZMANN_NOISE_DENSITY_DBM_HZ = -174.0
 _EULER_MASCHERONI = 0.5772156649015329
-
-
-@dataclass(unsafe_hash=True)
-class AccessPoint:
-    """A Wi-Fi access point: identity, fixed position, and broadcast frequency."""
-
-    name: str
-    bssid: str
-    position: Coord3D
-    frequency_mhz: int
-
-    @property
-    def xy(self) -> Tuple[float, float]:
-        return self.position[0], self.position[1]
 
 
 @dataclass
@@ -46,15 +35,8 @@ class Receiver:
 
 
 @dataclass
-class Reading:
-    """One simulated measurement between an access point and a receiver."""
-
-    # The original fields remain first so existing localisers stay compatible.
-    rssi_dbm: float
-    link_speed_mbps: float
-    tx_mbps: float
-    rx_mbps: float
-    rtt_ms: float
+class SimulatedReading(Reading):
+    """Measurement plus channel diagnostics that algorithms must not consume."""
 
     # Diagnostics make each stochastic sample explainable and testable.
     noise_floor_dbm: Optional[float] = None
@@ -65,9 +47,6 @@ class Reading:
     measurement_error_db: Optional[float] = None
     wall_count: int = 0
     is_nlos: bool = False
-
-
-Scan = dict[AccessPoint, Optional[Reading]]
 
 
 @dataclass(frozen=True)
@@ -152,6 +131,11 @@ class Network:
     rtt_nlos_outlier_probability: float = 0.08
     rtt_outlier_mean_m: float = 2.0
 
+    # Synthetic FTM bursts, conditional on AP visibility. These provisional
+    # settings model measurement delivery, not MAC contention or negotiation.
+    ftm_burst_size: int = 8
+    ftm_success_probability: float = 0.95
+
     _shadow_fields: dict[str, _SpatialShadowField] = field(
         default_factory=dict,
         init=False,
@@ -213,6 +197,7 @@ class Network:
                 raise ValueError(f"{name} must be a non-negative finite number")
 
         probabilities = {
+            "ftm_success_probability": self.ftm_success_probability,
             "interference_burst_start_probability": self.interference_burst_start_probability,
             "interference_burst_end_probability": self.interference_burst_end_probability,
             "rtt_outlier_probability": self.rtt_outlier_probability,
@@ -222,6 +207,12 @@ class Network:
             if not math.isfinite(value) or not 0.0 <= value <= 1.0:
                 raise ValueError(f"{name} must be between 0 and 1")
 
+        if (
+            isinstance(self.ftm_burst_size, bool)
+            or not isinstance(self.ftm_burst_size, int)
+            or self.ftm_burst_size < 1
+        ):
+            raise ValueError("ftm_burst_size must be an integer of at least 1")
         if (
             isinstance(self.shadowing_components, bool)
             or not isinstance(self.shadowing_components, int)
@@ -442,7 +433,7 @@ class Network:
         )
         return sample.rssi_dbm
 
-    def rtt(
+    def _measured_range_m(
         self,
         distance: float,
         rssi: float,
@@ -450,7 +441,7 @@ class Network:
         *,
         wall_count: int = 0,
     ) -> float:
-        """Simulate an FTM range error and convert the apparent range to RTT."""
+        """Draw a measured slant range, retaining signed measurement errors."""
 
         weak_margin_db = max(self.rtt_weak_signal_threshold_dbm - rssi, 0.0)
         weak_signal_bias_m = self.rtt_weak_signal_penalty_m * (
@@ -470,13 +461,78 @@ class Network:
         if rng.random() < outlier_probability:
             range_error_m += rng.expovariate(1.0 / self.rtt_outlier_mean_m)
 
-        apparent_distance = max(distance + range_error_m, 0.05)
+        return distance + range_error_m
+
+    def rtt(
+        self,
+        distance: float,
+        rssi: float,
+        rng: Random,
+        *,
+        wall_count: int = 0,
+    ) -> float:
+        """Legacy latency abstraction, including the artificial base offset."""
+        apparent_distance = max(
+            self._measured_range_m(distance, rssi, rng, wall_count=wall_count), 0.05,
+        )
         time_of_flight_ms = (2.0 * apparent_distance / SPEED_OF_LIGHT) * 1000.0
         return round(self.rtt_base_ms + time_of_flight_ms, 9)
 
-    def scan(self, receiver: Receiver, rng: Random) -> Scan:
+    @staticmethod
+    def _independent_ftm_rng(rng: Random) -> Random:
+        """Derive a repeatable stream without advancing the RSSI/legacy stream.
+
+        Burst settings then cannot change subsequent RSSI benchmark inputs.
+        A caller may instead pass its own dedicated FTM Random instance.
+        """
+        digest = hashlib.blake2b(repr(rng.getstate()).encode("ascii"), digest_size=16).digest()
+        return Random(int.from_bytes(digest, "big"))
+
+    def ftm_burst(
+        self,
+        distance: float,
+        rssi: float,
+        rng: Random,
+        *,
+        wall_count: int = 0,
+    ) -> FTMBurst:
+        """Generate a burst through the same four-timestamp measurement API.
+
+        Independent clocks have an arbitrary offset and fixed ACK turnaround;
+        both cancel in the FTM equation. Channel/device range errors survive.
+        Clock skew, counter wrap and protocol scheduling are outside this model.
+        """
+        samples = []
+        for index in range(self.ftm_burst_size):
+            if rng.random() >= self.ftm_success_probability:
+                samples.append(FTMSample(None, successful=False))
+                continue
+            measured_range = self._measured_range_m(distance, rssi, rng, wall_count=wall_count)
+            propagation_ns = distance_m_to_rtt_ns(measured_range)
+            t1_ns = index * 1_000_000.0
+            t2_ns = t1_ns + 10_000_000.0 + propagation_ns / 2.0
+            turnaround_ns = 50_000.0
+            samples.append(FTMExchange(
+                t1_ns=t1_ns,
+                t2_ns=t2_ns,
+                t3_ns=t2_ns + turnaround_ns,
+                t4_ns=t1_ns + turnaround_ns + propagation_ns,
+            ).to_sample())
+        return FTMBurst(tuple(samples))
+
+    def scan(
+        self,
+        receiver: Receiver,
+        rng: Random,
+        *,
+        ftm_rng: Optional[Random] = None,
+        include_ftm: bool = True,
+    ) -> Scan:
         """Scan all APs under one shared noise/interference realization."""
 
+        burst_rng = ftm_rng
+        if include_ftm and burst_rng is None:
+            burst_rng = self._independent_ftm_rng(rng)
         noise_floors: dict[int, float] = {}
         for ap in self.access_points:
             if ap.frequency_mhz not in noise_floors:
@@ -490,6 +546,8 @@ class Network:
                 receiver,
                 rng,
                 noise_floor_dbm=noise_floors[ap.frequency_mhz],
+                ftm_rng=burst_rng,
+                include_ftm=include_ftm,
             )
             for ap in self.access_points
         }
@@ -511,7 +569,9 @@ class Network:
         rng: Random,
         *,
         noise_floor_dbm: Optional[float] = None,
-    ) -> Optional[Reading]:
+        ftm_rng: Optional[Random] = None,
+        include_ftm: bool = True,
+    ) -> Optional[SimulatedReading]:
         """Simulate one internally consistent AP measurement."""
 
         floor = (
@@ -527,12 +587,21 @@ class Network:
         distance = self._distance(ap, receiver)
         wall_count = len(sample.walls)
 
-        return Reading(
+        legacy_rtt_ms = self.rtt(distance, sample.rssi_dbm, rng, wall_count=wall_count)
+        burst = None
+        if include_ftm and ap.ftm_responder:
+            burst = self.ftm_burst(
+                math.dist(ap.position, receiver.position), sample.rssi_dbm,
+                ftm_rng if ftm_rng is not None else self._independent_ftm_rng(rng),
+                wall_count=wall_count,
+            )
+        return SimulatedReading(
             rssi_dbm=sample.rssi_dbm,
             link_speed_mbps=link_speed_mbps,
             tx_mbps=link_speed_mbps,
             rx_mbps=link_speed_mbps,
-            rtt_ms=self.rtt(distance, sample.rssi_dbm, rng, wall_count=wall_count),
+            rtt_ms=legacy_rtt_ms,
+            ftm_burst=burst,
             noise_floor_dbm=round(sample.noise_floor_dbm, 2),
             snr_db=round(sample.snr_db, 2),
             mean_rssi_dbm=round(sample.mean_rssi_dbm, 2),

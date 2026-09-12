@@ -1,3 +1,5 @@
+"""Ship geometry and layout loading for simulation and benchmark reporting."""
+
 from shapely.geometry import LineString, Point, Polygon
 from dataclasses import dataclass, field
 from typing import List, Optional, Tuple

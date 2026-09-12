@@ -2,8 +2,8 @@ import math
 import unittest
 from random import Random
 
-from environment import ShipEnvironment, Wall
-from network import AccessPoint, Network, Receiver, SPEED_OF_LIGHT
+from simulator.environment import ShipEnvironment, Wall
+from simulator.network import AccessPoint, Network, Receiver, SPEED_OF_LIGHT
 
 
 class NetworkNoiseModelTests(unittest.TestCase):

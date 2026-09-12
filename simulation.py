@@ -1,20 +1,28 @@
+"""Simulation composition, benchmarks, and plotting; algorithms live in crew_tracking."""
+
+import argparse
 import math
 from pathlib import Path
 from random import Random
 
-import matplotlib.pyplot as plt
-import matplotlib.patheffects as pe
 import numpy as np
 
-from network import Network, AccessPoint, Receiver
-from environment import ShipEnvironment
-from positioning import NearestAPLocaliser, WeightedCentroidLocaliser, RSSTrilaterationLocaliser, RTTTrilaterationLocaliser
-from fingerprinting import FingerprintEntry, build_radio_map, FingerprintLocaliser, FingerprintCompartmentLocaliser
+from crew_tracking.models import AccessPoint, PathLossModel
+from crew_tracking.ftm import FTMLocaliser
+from crew_tracking.positioning import (
+    NearestAPLocaliser, WeightedCentroidLocaliser,
+    RSSTrilaterationLocaliser, RTTTrilaterationLocaliser,
+)
+from crew_tracking.fingerprinting import FingerprintEntry, FingerprintLocaliser
+from simulator.calibration import build_radio_map
+from simulator.network import Network, Receiver
 from typing import List, Optional, Sequence
 
 Metric = str
 
 def display_network(network: Network) -> None:
+    import matplotlib.pyplot as plt
+
     environment = network.environment
     fig, ax = plt.subplots()
 
@@ -196,6 +204,8 @@ def _heatmap_values(
  
 def _draw_layout(ax, network: Network, fill_compartments: bool = True) -> None:
     """Draw compartments, walls, APs and receivers onto an existing axis."""
+    import matplotlib.patheffects as pe
+
     environment = network.environment
  
     for compartment in environment.compartments:
@@ -255,6 +265,8 @@ def plot_fingerprint_heatmap(
     cmap: str = "viridis",
     show: bool = True,
 ):
+    import matplotlib.pyplot as plt
+
     xs, ys, vals, label = _heatmap_values(radio_map, ap_order, metric, ap_name, coverage_threshold_dbm)
  
     if layout == "overlay":
@@ -285,14 +297,37 @@ def plot_fingerprint_heatmap(
 
 
 
-def main() -> None:
+def _positive_int(value: str) -> int:
+    result = int(value)
+    if result <= 0:
+        raise argparse.ArgumentTypeError("must be a positive integer")
+    return result
+
+
+def _positive_float(value: str) -> float:
+    result = float(value)
+    if not math.isfinite(result) or result <= 0:
+        raise argparse.ArgumentTypeError("must be finite and positive")
+    return result
+
+
+def main(argv: Optional[Sequence[str]] = None) -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--no-plots", action="store_true", help="Run benchmarks without plot windows")
+    parser.add_argument("--trials", type=_positive_int, default=300,
+                        help="Trials per compartment in each benchmark (default: 300)")
+    parser.add_argument("--grid-spacing", type=_positive_float, default=0.3,
+                        help="Fingerprint survey grid spacing in metres (default: 0.3)")
+    parser.add_argument("--calibration-samples", type=_positive_int, default=15,
+                        help="Scans per fingerprint reference point (default: 15)")
+    args = parser.parse_args(argv)
+
     radio_map_rng = Random(12345)
     demo_rng = Random(23456)
     coverage_rng = Random(34567)
     performance_rng = Random(45678)
     breakdown_rng = Random(56789)
     layout_path = Path(__file__).resolve().parent / "layouts" / "simple_layout2.yaml"
-    environment = ShipEnvironment.from_config(layout_path)
     ap1 = AccessPoint("Router1", "24:2f:d0:fb:85:b9", (4.5, 1.5, 1.5), 2412)
     ap2 = AccessPoint("Router2", "25:3f:d0:fb:85:c4", (1.5, 4.5, 1.0), 2412)
     ap3 = AccessPoint("Router3", "26:4f:d0:fb:85:c0", (8.0, 3.0, 0.5), 2412)
@@ -306,21 +341,40 @@ def main() -> None:
         access_points=[ap1, ap2, ap3, ap4, ap5],
         receivers=[re1, re2],
     )
+    environment = network.environment
+
+    # Deployment metadata is passed explicitly: estimators never inspect the
+    # simulated environment or receiver's ground-truth coordinates.
+    path_loss = PathLossModel(
+        reference_rssi_dbm=network.reference_rssi_dbm,
+        reference_distance_m=network.reference_distance_m,
+        path_loss_exponent=network.path_loss_exponent,
+    )
+    compartment_bounds = [comp.geometry.bounds for comp in environment.compartments]
+    bounds = (
+        (min(b[0] for b in compartment_bounds), min(b[1] for b in compartment_bounds)),
+        (max(b[2] for b in compartment_bounds), max(b[3] for b in compartment_bounds)),
+    ) if compartment_bounds else None
 
     ap_order = network.access_points
     radio_map = build_radio_map(
         network,
         radio_map_rng,
         ap_order,
-        grid_spacing_m=0.3,
-        samples_per_point=15,
+        grid_spacing_m=args.grid_spacing,
+        samples_per_point=args.calibration_samples,
     )
 
     nearest_ap_localiser = NearestAPLocaliser()
-    weighted_distance_localiser = WeightedCentroidLocaliser(network, weight_mode="distance")
-    weighted_power_localiser = WeightedCentroidLocaliser(network, weight_mode="linear_power")
-    rss_trilateration_localiser = RSSTrilaterationLocaliser(network)
-    rtt_trilateration_localiser = RTTTrilaterationLocaliser(network)
+    weighted_distance_localiser = WeightedCentroidLocaliser(path_loss, weight_mode="distance")
+    weighted_power_localiser = WeightedCentroidLocaliser(path_loss, weight_mode="linear_power")
+    rss_trilateration_localiser = RSSTrilaterationLocaliser(path_loss, bounds=bounds)
+    rtt_trilateration_localiser = RTTTrilaterationLocaliser(
+        rtt_offset_ms=network.rtt_base_ms, bounds=bounds,
+    )
+    # A fixed, configured receiver height is assumed for all FTM estimates.
+    # The desk receiver deliberately differs, exposing deployment model error.
+    ftm_localiser = FTMLocaliser(receiver_height_m=1.0, bounds=bounds)
     fingerprint_localiser = FingerprintLocaliser(radio_map, ap_order, k=3)
 
     localisers = {
@@ -328,23 +382,25 @@ def main() -> None:
         "WeightedCentroid(dist)": weighted_distance_localiser,
         "WeightedCentroid(power)": weighted_power_localiser,
         "RSS Trilateration": rss_trilateration_localiser,
-        "RTT": rtt_trilateration_localiser,
+        "Legacy RTT": rtt_trilateration_localiser,
+        "FTM": ftm_localiser,
         "Fingerprint": fingerprint_localiser,
     }
 
     def get_coordinate_guess(receiver: Receiver) -> Optional[tuple[float, float]]:
+        """Demonstrate heuristic fusion; weights are not statistically calibrated."""
         scan = network.scan(receiver, demo_rng)
         nearest_ap_estimate = nearest_ap_localiser.locate(scan)
         weighted_power_estimate = weighted_power_localiser.locate(scan)
         fingerprint_estimate = fingerprint_localiser.locate(scan)
-        rtt_estimate = rtt_trilateration_localiser.locate(scan)
+        ftm_estimate = ftm_localiser.locate(scan)
 
-        if rtt_estimate is not None:
+        if ftm_estimate is not None:
             weighted_estimates = [
                 (nearest_ap_estimate, 0.1),
                 (weighted_power_estimate, 0.2),
                 (fingerprint_estimate, 0.4),
-                (rtt_estimate, 0.3),
+                (ftm_estimate, 0.3),
             ]
         else:
             weighted_estimates = [
@@ -384,14 +440,17 @@ def main() -> None:
         )
 
     network.reset_channel_state()
-    report_ap_coverage(network, coverage_rng)
+    report_ap_coverage(network, coverage_rng, n_trials=args.trials)
     network.reset_channel_state()
-    report_localiser_stats(localisers, network, performance_rng)
+    report_localiser_stats(localisers, network, performance_rng,
+                           n_trials_per_compartment=args.trials)
     network.reset_channel_state()
-    report_compartment_breakdown(localisers, network, breakdown_rng)
+    report_compartment_breakdown(localisers, network, breakdown_rng,
+                                 n_trials_per_compartment=args.trials)
 
-    plot_fingerprint_heatmap(network, radio_map, ap_order, metric="best_signal", layout="overlay")
-    plot_fingerprint_heatmap(network, radio_map, ap_order, metric="coverage", layout="side")
+    if not args.no_plots:
+        plot_fingerprint_heatmap(network, radio_map, ap_order, metric="best_signal", layout="overlay")
+        plot_fingerprint_heatmap(network, radio_map, ap_order, metric="coverage", layout="side")
 
 
 if __name__ == "__main__":
