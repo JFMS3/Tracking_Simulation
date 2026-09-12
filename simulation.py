@@ -11,8 +11,13 @@ from environment import ShipEnvironment
 from positioning import NearestAPLocaliser, WeightedCentroidLocaliser, RSSTrilaterationLocaliser, RTTTrilaterationLocaliser
 from fingerprinting import FingerprintEntry, build_radio_map, FingerprintLocaliser, FingerprintCompartmentLocaliser
 from typing import List, Optional, Sequence
+from dotenv import load_dotenv
+from wrapper.incident_dispatch import IncidentDispatchGraph
 
 Metric = str
+ROOT = Path(__file__).resolve().parent
+load_dotenv(ROOT / ".env")
+
 
 def display_network(network: Network) -> None:
     environment = network.environment
@@ -283,6 +288,39 @@ def plot_fingerprint_heatmap(
     return fig
  
 
+def get_coordinate_guess(network: Network, receiver: Receiver, rng, localisers) -> Optional[tuple[float, float]]:
+    scan = network.scan(receiver, rng)
+    nearest_ap_estimate = localisers.get("NearestAP").locate(scan)
+    weighted_power_estimate = localisers.get("WeightedCentroidPower").locate(scan)
+    fingerprint_estimate = localisers.get("Fingerprint").locate(scan)
+    rtt_estimate = localisers.get("RTT").locate(scan)
+
+    if rtt_estimate is not None:
+        weighted_estimates = [
+            (nearest_ap_estimate, 0.1),
+            (weighted_power_estimate, 0.2),
+            (fingerprint_estimate, 0.4),
+            (rtt_estimate, 0.3),
+        ]
+    else:
+        weighted_estimates = [
+            (nearest_ap_estimate, 0.1),
+            (weighted_power_estimate, 0.3),
+            (fingerprint_estimate, 0.6),
+        ]
+
+    available = [
+        (estimate.position, weight)
+        for estimate, weight in weighted_estimates
+        if estimate is not None
+    ]
+    if not available:
+        return None
+
+    coords, weights = zip(*available)
+    average = np.average(coords, axis=0, weights=weights)
+    return float(average[0]), float(average[1])
+
 
 
 def main() -> None:
@@ -293,18 +331,26 @@ def main() -> None:
     breakdown_rng = Random(56789)
     layout_path = Path(__file__).resolve().parent / "layouts" / "simple_layout2.yaml"
     environment = ShipEnvironment.from_config(layout_path)
+    dispatcher = IncidentDispatchGraph(
+        employee_file=ROOT / "wrapper" / "employees.txt",
+        environment=environment,
+        model="gpt-4o",
+    )
     ap1 = AccessPoint("Router1", "24:2f:d0:fb:85:b9", (4.5, 1.5, 1.5), 2412)
     ap2 = AccessPoint("Router2", "25:3f:d0:fb:85:c4", (1.5, 4.5, 1.0), 2412)
     ap3 = AccessPoint("Router3", "26:4f:d0:fb:85:c0", (8.0, 3.0, 0.5), 2412)
     ap4 = AccessPoint("Router4", "27:A0:d0:fb:85:c4", (5.0, 6.2, 1.0), 2412)
     ap5 = AccessPoint("Router5", "28:25:d0:fb:85:c0", (6.8, 4.5, 0.5), 2412)
-    re1 = Receiver("Phone-Desk", (3, 5.9, 0.7))
-    re2 = Receiver("Phone-Engine", (2, 1, 1))
+    re1 = Receiver("EMP001", (3, 5.9, 0.7))
+    re2 = Receiver("EMP002", (2, 1, 1))
+    re3 = Receiver("EMP003", (3, 5, 1))
+    re4 = Receiver("EMP004", (1, 3, 2))
+
 
     network = Network.from_config(
         layout_path,
         access_points=[ap1, ap2, ap3, ap4, ap5],
-        receivers=[re1, re2],
+        receivers=[re1, re2, re3, re4],
     )
 
     ap_order = network.access_points
@@ -325,54 +371,21 @@ def main() -> None:
 
     localisers = {
         "NearestAP": nearest_ap_localiser,
-        "WeightedCentroid(dist)": weighted_distance_localiser,
-        "WeightedCentroid(power)": weighted_power_localiser,
-        "RSS Trilateration": rss_trilateration_localiser,
+        "WeightedCentroidDistance": weighted_distance_localiser,
+        "WeightedCentroidPower": weighted_power_localiser,
+        "RSSTrilateration": rss_trilateration_localiser,
         "RTT": rtt_trilateration_localiser,
         "Fingerprint": fingerprint_localiser,
     }
 
-    def get_coordinate_guess(receiver: Receiver) -> Optional[tuple[float, float]]:
-        scan = network.scan(receiver, demo_rng)
-        nearest_ap_estimate = nearest_ap_localiser.locate(scan)
-        weighted_power_estimate = weighted_power_localiser.locate(scan)
-        fingerprint_estimate = fingerprint_localiser.locate(scan)
-        rtt_estimate = rtt_trilateration_localiser.locate(scan)
-
-        if rtt_estimate is not None:
-            weighted_estimates = [
-                (nearest_ap_estimate, 0.1),
-                (weighted_power_estimate, 0.2),
-                (fingerprint_estimate, 0.4),
-                (rtt_estimate, 0.3),
-            ]
-        else:
-            weighted_estimates = [
-                (nearest_ap_estimate, 0.1),
-                (weighted_power_estimate, 0.3),
-                (fingerprint_estimate, 0.6),
-            ]
-
-        available = [
-            (estimate.position, weight)
-            for estimate, weight in weighted_estimates
-            if estimate is not None
-        ]
-        if not available:
-            return None
-
-        coords, weights = zip(*available)
-        average = np.average(coords, axis=0, weights=weights)
-        return float(average[0]), float(average[1])
-
     for i in range(10):
-        re1_coordinate_guess = get_coordinate_guess(re1)
+        re1_coordinate_guess = get_coordinate_guess(network, re1, demo_rng, localisers)
         re1_compartment_guess = (
             environment.compartment_at(re1_coordinate_guess)
             if re1_coordinate_guess is not None
             else None
         ) or "Unknown"
-        re2_coordinate_guess = get_coordinate_guess(re2)
+        re2_coordinate_guess = get_coordinate_guess(network, re2, demo_rng, localisers)
         re2_compartment_guess = (
             environment.compartment_at(re2_coordinate_guess)
             if re2_coordinate_guess is not None
@@ -393,6 +406,32 @@ def main() -> None:
     plot_fingerprint_heatmap(network, radio_map, ap_order, metric="best_signal", layout="overlay")
     plot_fingerprint_heatmap(network, radio_map, ap_order, metric="coverage", layout="side")
 
+
+    current_positions = {}
+
+    for receiver in network.receivers:
+        coordinate_guess = get_coordinate_guess(
+            network,
+            receiver,
+            demo_rng,
+            localisers,
+        )
+
+        current_positions[receiver.name] = {
+            "position": coordinate_guess,
+            "confidence": 0.85 if coordinate_guess is not None else 0.0,
+        }
+
+    result = dispatcher.recommend(
+        incident="There is a small water spill on the floor.",
+        incident_location="Laundry",
+        current_positions=current_positions,
+    )
+
+    try:
+        print(result['rationale'])
+    except:
+        print(result)
 
 if __name__ == "__main__":
     main()
