@@ -131,6 +131,7 @@ class IncidentDispatchGraph:
         self.incident_model = base_model.with_structured_output(IncidentAnalysis, method="json_schema")
         self.decision_model = base_model.with_structured_output(DispatchDecision, method="json_schema")
         self.graph = self._build_graph()
+        
 
     def _build_graph(self):
         builder = StateGraph(DispatchState)
