@@ -1,4 +1,7 @@
+import atexit
 import math
+import sys
+from datetime import datetime
 from pathlib import Path
 from random import Random
 
@@ -8,11 +11,51 @@ import numpy as np
 
 from network import Network, AccessPoint, Receiver
 from environment import ShipEnvironment
-from positioning import NearestAPLocaliser, WeightedCentroidLocaliser, RSSTrilaterationLocaliser, RTTTrilaterationLocaliser
+from positioning import NearestAPLocaliser, WeightedCentroidLocaliser, RSSTrilaterationLocaliser, RTTTrilaterationLocaliser, WallAwareLocaliser
 from fingerprinting import FingerprintEntry, build_radio_map, FingerprintLocaliser, FingerprintCompartmentLocaliser
 from typing import List, Optional, Sequence
 
 Metric = str
+
+RESULTS_DIR = Path(__file__).resolve().parent / "results"
+
+
+class _Tee:
+    """Write everything to several streams, e.g. the console and a results file."""
+    def __init__(self, *streams):
+        self.streams = streams
+
+    def write(self, text: str) -> int:
+        for stream in self.streams:
+            stream.write(text)
+        return len(text)
+
+    def flush(self) -> None:
+        for stream in self.streams:
+            stream.flush()
+
+
+def start_saving_results(results_dir: Path = RESULTS_DIR) -> Path:
+    """Mirror all printed output from now on into results/<timestamp>/results.txt"""
+    run_dir = results_dir / datetime.now().strftime("%Y%m%d_%H%M%S")
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    results_file = (run_dir / "results.txt").open("w", encoding="utf-8")
+    console = sys.stdout
+    sys.stdout = _Tee(console, results_file)
+
+    def stop_saving() -> None:
+        sys.stdout = console
+        results_file.close()
+
+    atexit.register(stop_saving)
+    print(f"Saving results to {run_dir}\n")
+    return run_dir
+
+
+def save_figures(run_dir: Path, figures: dict) -> None:
+    for name, fig in figures.items():
+        fig.savefig(run_dir / f"{name}.png", dpi=150, bbox_inches="tight")
 
 def display_network(network: Network) -> None:
     environment = network.environment
@@ -81,26 +124,27 @@ def report_ap_coverage(network: Network, rng: Random, n_trials: int = 300) -> No
     print()
 
 
-def report_localiser_stats(
-    localisers: dict,
+def sample_trials(
     network: Network,
     rng: Random,
     n_trials_per_compartment: int = 300,
-) -> None:
+    receiver_rssi_bias_db: float = 0.0,
+) -> list:
+    """Random (compartment, true position, scan) trials, an equal number per compartment."""
     environment = network.environment
-    print("=== Localiser performance across ALL compartments ===")
-    header = f"{'Method':<24}{'Mean err':<10}{'Median err':<12}{'P90 err':<10}{'Miss rate':<11}{'Compartment acc':<16}"
-    print(header)
-
-    # Every method must see the same locations and the same stochastic scans;
-    # otherwise differences in fading/dropout are confounded with the method.
     trials = []
     for comp in environment.compartments:
         for _ in range(n_trials_per_compartment):
             true_pos = environment.random_point_in(comp.name, rng)
-            receiver = Receiver("probe", (*true_pos, 1.0))
+            receiver = Receiver("probe", (*true_pos, 1.0), rssi_bias_db=receiver_rssi_bias_db)
             trials.append((comp.name, true_pos, network.scan(receiver, rng)))
+    return trials
 
+
+def evaluate_localisers(localisers: dict, network: Network, trials: list) -> dict:
+    """Score every localiser on the same trials. Returns {name: stats dict}."""
+    environment = network.environment
+    results = {}
     for name, loc in localisers.items():
         errors = []
         misses = 0
@@ -118,15 +162,38 @@ def report_localiser_stats(
             if environment.compartment_at(estimate.position) == compartment_name:
                 compartment_correct += 1
 
-        mean_err = sum(errors) / len(errors) if errors else float("nan")
-        median_err = sorted(errors)[len(errors) // 2] if errors else float("nan")
-        p90_err = sorted(errors)[int(len(errors) * 0.9)] if errors else float("nan")
-        miss_rate = misses / total
-        compartment_acc = compartment_correct / total  # misses count as wrong
+        errors.sort()
+        results[name] = {
+            "errors": errors,
+            "mean_err": sum(errors) / len(errors) if errors else float("nan"),
+            "median_err": errors[len(errors) // 2] if errors else float("nan"),
+            "p90_err": errors[int(len(errors) * 0.9)] if errors else float("nan"),
+            "miss_rate": misses / total,
+            "compartment_acc": compartment_correct / total,  # misses count as wrong
+        }
+    return results
 
-        print(f"{name:<24}{mean_err:<10.2f}{median_err:<12.2f}{p90_err:<10.2f}"
-              f"{miss_rate:<11.1%}{compartment_acc:<16.1%}")
+
+def report_localiser_stats(
+    localisers: dict,
+    network: Network,
+    rng: Random,
+    n_trials_per_compartment: int = 300,
+) -> dict:
+    print("=== Localiser performance across ALL compartments ===")
+    header = f"{'Method':<24}{'Mean err':<10}{'Median err':<12}{'P90 err':<10}{'Miss rate':<11}{'Compartment acc':<16}"
+    print(header)
+
+    # Every method must see the same locations and the same stochastic scans;
+    # otherwise differences in fading/dropout are confounded with the method.
+    trials = sample_trials(network, rng, n_trials_per_compartment)
+    results = evaluate_localisers(localisers, network, trials)
+
+    for name, stats in results.items():
+        print(f"{name:<24}{stats['mean_err']:<10.2f}{stats['median_err']:<12.2f}{stats['p90_err']:<10.2f}"
+              f"{stats['miss_rate']:<11.1%}{stats['compartment_acc']:<16.1%}")
     print()
+    return results
 
 
 def report_compartment_breakdown(
@@ -286,6 +353,12 @@ def plot_fingerprint_heatmap(
 
 
 def main() -> None:
+    
+    run_dir: Optional[Path] = None
+    
+    # Comment out the line below to stop saving printed results and plots to results/<timestamp>/
+    # run_dir = start_saving_results()
+
     radio_map_rng = Random(12345)
     demo_rng = Random(23456)
     coverage_rng = Random(34567)
@@ -322,6 +395,9 @@ def main() -> None:
     rss_trilateration_localiser = RSSTrilaterationLocaliser(network)
     rtt_trilateration_localiser = RTTTrilaterationLocaliser(network)
     fingerprint_localiser = FingerprintLocaliser(radio_map, ap_order, k=3)
+    wall_aware_rss_localiser = WallAwareLocaliser(network, measurement="rss")
+    wall_aware_rtt_localiser = WallAwareLocaliser(network, measurement="rtt")
+    wall_aware_hybrid_localiser = WallAwareLocaliser(network, measurement="hybrid")
 
     localisers = {
         "NearestAP": nearest_ap_localiser,
@@ -330,6 +406,9 @@ def main() -> None:
         "RSS Trilateration": rss_trilateration_localiser,
         "RTT": rtt_trilateration_localiser,
         "Fingerprint": fingerprint_localiser,
+        "WallAware RSS": wall_aware_rss_localiser,
+        "WallAware RTT": wall_aware_rtt_localiser,
+        "WallAware Hybrid": wall_aware_hybrid_localiser,
     }
 
     def get_coordinate_guess(receiver: Receiver) -> Optional[tuple[float, float]]:
@@ -390,8 +469,17 @@ def main() -> None:
     network.reset_channel_state()
     report_compartment_breakdown(localisers, network, breakdown_rng)
 
-    plot_fingerprint_heatmap(network, radio_map, ap_order, metric="best_signal", layout="overlay")
-    plot_fingerprint_heatmap(network, radio_map, ap_order, metric="coverage", layout="side")
+    figures = {
+        "heatmap_best_signal": plot_fingerprint_heatmap(
+            network, radio_map, ap_order, metric="best_signal", layout="overlay", show=False
+        ),
+        "heatmap_coverage": plot_fingerprint_heatmap(
+            network, radio_map, ap_order, metric="coverage", layout="side", show=False
+        ),
+    }
+    if run_dir is not None:
+        save_figures(run_dir, figures)
+    plt.show()
 
 
 if __name__ == "__main__":

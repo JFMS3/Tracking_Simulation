@@ -1,3 +1,5 @@
+import numpy as np
+import shapely
 from shapely.geometry import LineString, Point, Polygon
 from dataclasses import dataclass, field
 from typing import List, Optional, Tuple
@@ -60,6 +62,37 @@ class ShipEnvironment:
         '''Returns all walls where the line p1-p2 crosses over'''
         ray = LineString([p1, p2])
         return [w for w in self.walls if ray.crosses(w.geometry)]
+
+    def crossing_matrix(self, starts: np.ndarray, ends: np.ndarray) -> np.ndarray:
+        """Vectorised walls_crossed: (n_segments, n_walls) bool, True where the
+        segment starts[i] -> ends[i] crosses wall j.
+
+        A strict orientation test decides the clear cases quickly. Segments that
+        pass within floating-point noise of a wall's line or endpoint are
+        re-checked with shapely, so the result always agrees with walls_crossed.
+        """
+        starts = np.asarray(starts, dtype=float)
+        ends = np.asarray(ends, dtype=float)
+
+        def orientation(a, b, c):
+            return (b[:, 0] - a[:, 0]) * (c[:, 1] - a[:, 1]) - (b[:, 1] - a[:, 1]) * (c[:, 0] - a[:, 0])
+
+        result = np.zeros((len(starts), len(self.walls)), dtype=bool)
+        for j, wall in enumerate(self.walls):
+            q1 = np.broadcast_to(np.array(wall.p1, dtype=float), starts.shape)
+            q2 = np.broadcast_to(np.array(wall.p2, dtype=float), starts.shape)
+            o1 = orientation(starts, ends, q1)
+            o2 = orientation(starts, ends, q2)
+            o3 = orientation(q1, q2, starts)
+            o4 = orientation(q1, q2, ends)
+            result[:, j] = (o1 * o2 < 0) & (o3 * o4 < 0)
+
+            near_degenerate = np.min(np.abs([o1, o2, o3, o4]), axis=0) < 1e-9
+            if near_degenerate.any():
+                idx = np.flatnonzero(near_degenerate)
+                segments = shapely.linestrings(np.stack([starts[idx], ends[idx]], axis=1))
+                result[idx, j] = shapely.crosses(segments, wall.geometry)
+        return result
 
     def random_point_in(self, compartment_name: str, rng) -> Coord:
         """Rejection-sample a uniformly random point inside a named compartment."""

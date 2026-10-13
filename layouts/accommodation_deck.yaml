@@ -1,0 +1,100 @@
+# A 24 m x 10 m accommodation deck: a central corridor (y 4-6) with cabins and
+# working spaces either side. Doorways are 1 m gaps in the corridor bulkheads
+# (doors assumed open). Cabins are separated by lighter joiner panels rather
+# than full steel bulkheads.
+
+compartments:
+  - name: Corridor
+    boundary: [[0, 4], [24, 4], [24, 6], [0, 6]]
+
+  # South side (y 0-4)
+  - name: Cabin 1
+    boundary: [[0, 0], [4, 0], [4, 4], [0, 4]]
+  - name: Cabin 2
+    boundary: [[4, 0], [8, 0], [8, 4], [4, 4]]
+  - name: Mess
+    boundary: [[8, 0], [16, 0], [16, 4], [8, 4]]
+  - name: Galley
+    boundary: [[16, 0], [20, 0], [20, 4], [16, 4]]
+  - name: Store
+    boundary: [[20, 0], [24, 0], [24, 4], [20, 4]]
+
+  # North side (y 6-10)
+  - name: Cabin 3
+    boundary: [[0, 6], [4, 6], [4, 10], [0, 10]]
+  - name: Cabin 4
+    boundary: [[4, 6], [8, 6], [8, 10], [4, 10]]
+  - name: Cabin 5
+    boundary: [[8, 6], [12, 6], [12, 10], [8, 10]]
+  - name: Engine Control Room
+    boundary: [[12, 6], [18, 6], [18, 10], [12, 10]]
+  - name: Workshop
+    boundary: [[18, 6], [24, 6], [24, 10], [18, 10]]
+
+walls:
+  # Outer hull
+  - {name: Hull South, p1: [0, 0], p2: [24, 0], material: steel_bulkhead, attenuation_db: 20.0}
+  - {name: Hull East, p1: [24, 0], p2: [24, 10], material: steel_bulkhead, attenuation_db: 20.0}
+  - {name: Hull North, p1: [24, 10], p2: [0, 10], material: steel_bulkhead, attenuation_db: 20.0}
+  - {name: Hull West, p1: [0, 10], p2: [0, 0], material: steel_bulkhead, attenuation_db: 20.0}
+
+  # South corridor bulkhead (y = 4), gaps are doorways
+  - {name: S Corridor 1, p1: [0, 4], p2: [1.5, 4], material: steel_bulkhead, attenuation_db: 20.0}
+  - {name: S Corridor 2, p1: [2.5, 4], p2: [5.5, 4], material: steel_bulkhead, attenuation_db: 20.0}
+  - {name: S Corridor 3, p1: [6.5, 4], p2: [11, 4], material: steel_bulkhead, attenuation_db: 20.0}
+  - {name: S Corridor 4, p1: [12, 4], p2: [17.5, 4], material: steel_bulkhead, attenuation_db: 20.0}
+  - {name: S Corridor 5, p1: [18.5, 4], p2: [21.5, 4], material: steel_bulkhead, attenuation_db: 20.0}
+  - {name: S Corridor 6, p1: [22.5, 4], p2: [24, 4], material: steel_bulkhead, attenuation_db: 20.0}
+
+  # North corridor bulkhead (y = 6)
+  - {name: N Corridor 1, p1: [0, 6], p2: [1.5, 6], material: steel_bulkhead, attenuation_db: 20.0}
+  - {name: N Corridor 2, p1: [2.5, 6], p2: [5.5, 6], material: steel_bulkhead, attenuation_db: 20.0}
+  - {name: N Corridor 3, p1: [6.5, 6], p2: [9.5, 6], material: steel_bulkhead, attenuation_db: 20.0}
+  - {name: N Corridor 4, p1: [10.5, 6], p2: [14.5, 6], material: steel_bulkhead, attenuation_db: 20.0}
+  - {name: N Corridor 5, p1: [15.5, 6], p2: [20.5, 6], material: steel_bulkhead, attenuation_db: 20.0}
+  - {name: N Corridor 6, p1: [21.5, 6], p2: [24, 6], material: steel_bulkhead, attenuation_db: 20.0}
+
+  # South side partitions
+  - {name: Cabin 1-2 Panel, p1: [4, 0], p2: [4, 4], material: joiner_panel, attenuation_db: 8.0}
+  - {name: Cabin 2-Mess Bulkhead, p1: [8, 0], p2: [8, 4], material: steel_bulkhead, attenuation_db: 20.0}
+  - {name: Mess-Galley Panel, p1: [16, 0], p2: [16, 4], material: joiner_panel, attenuation_db: 8.0}
+  - {name: Galley-Store Bulkhead, p1: [20, 0], p2: [20, 4], material: steel_bulkhead, attenuation_db: 20.0}
+
+  # North side partitions
+  - {name: Cabin 3-4 Panel, p1: [4, 6], p2: [4, 10], material: joiner_panel, attenuation_db: 8.0}
+  - {name: Cabin 4-5 Panel, p1: [8, 6], p2: [8, 10], material: joiner_panel, attenuation_db: 8.0}
+  - {name: Cabin 5-ECR Bulkhead, p1: [12, 6], p2: [12, 10], material: steel_bulkhead, attenuation_db: 20.0}
+  - {name: ECR-Workshop Bulkhead, p1: [18, 6], p2: [18, 10], material: steel_bulkhead, attenuation_db: 20.0}
+
+# Same provisional values as simple_layout2.yaml; see README for their basis.
+# The 8 dB joiner-panel loss is a placeholder for lightweight cabin partitions
+# and should be replaced with a measured value.
+propagation:
+  reference_rssi_dbm: -38.0
+  reference_distance_m: 1.0
+  path_loss_exponent: 2.15
+  shadowing_std_db: 2.0
+  shadowing_correlation_distance_m: 2.0
+  shadowing_components: 96
+  shadowing_seed: 12345
+  fast_fading_samples: 8
+  measurement_noise_std_db: 0.75
+  rssi_quantization_db: 1.0
+
+  channel_bandwidth_mhz: 20.0
+  receiver_noise_figure_db: 7.0
+  noise_floor_variation_std_db: 0.5
+  interference_burst_start_probability: 0.02
+  interference_burst_end_probability: 0.35
+  interference_burst_mean_rise_db: 8.0
+  detection_snr_midpoint_db: 6.0
+  detection_snr_transition_db: 1.5
+  beacons_per_scan: 3
+  legacy_wall_dropout: false
+
+  rtt_ranging_noise_m: 0.5
+  rtt_nlos_bias_per_wall_m: 1.0
+  rtt_nlos_noise_per_wall_m: 0.5
+  rtt_outlier_probability: 0.01
+  rtt_nlos_outlier_probability: 0.08
+  rtt_outlier_mean_m: 2.0

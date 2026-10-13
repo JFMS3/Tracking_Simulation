@@ -15,6 +15,31 @@ py simulation.py
 The layout path is resolved relative to `simulation.py`, so the script may also
 be launched from another working directory.
 
+```powershell
+py scenarios.py   # every localiser across 9 ship/channel scenarios -> results/scenarios/
+py tracking.py    # simulated crew walks, snapshot vs grid tracker -> results/tracking/
+```
+
+## Wall-aware localisation and tracking
+
+`WallAwareLocaliser` (positioning.py) evaluates every point of a grid over the
+deck: given the walls between that point and each AP, what RSSI and RTT range
+would be expected? It scores the scan against those predictions, also counting
+APs that were *not* heard as evidence. It can optionally estimate a constant
+per-scan phone RSSI offset. Plain RSS/RTT trilateration ignores walls, so
+every bulkhead's 20 dB loss is misread as extra distance; that is why those
+localisers fail between compartments.
+
+`GridTracker` (tracking.py) runs the same likelihood as a grid Bayes filter
+over time. Between scans, belief spreads by *walking distance* (the shortest
+route that does not pass through a wall), so it moves between compartments
+only through doorways.
+
+Both rely on the model in the `Network` they are given. `scenarios.py` tests
+them when that model is wrong (wall losses, path-loss exponent, RTT bias),
+when the phone has an RSSI offset, and with 2.4 GHz RTT errors closer to those
+reported for commodity phones.
+
 ## Propagation and noise model
 
 The model deliberately separates effects that have different physical and
