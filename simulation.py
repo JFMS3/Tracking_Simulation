@@ -331,11 +331,7 @@ def main() -> None:
     breakdown_rng = Random(56789)
     layout_path = Path(__file__).resolve().parent / "layouts" / "simple_layout2.yaml"
     environment = ShipEnvironment.from_config(layout_path)
-    dispatcher = IncidentDispatchGraph(
-        employee_file=ROOT / "wrapper" / "employees.txt",
-        environment=environment,
-        model="gpt-4o",
-    )
+
     ap1 = AccessPoint("Router1", "24:2f:d0:fb:85:b9", (4.5, 1.5, 1.5), 2412)
     ap2 = AccessPoint("Router2", "25:3f:d0:fb:85:c4", (1.5, 4.5, 1.0), 2412)
     ap3 = AccessPoint("Router3", "26:4f:d0:fb:85:c0", (8.0, 3.0, 0.5), 2412)
@@ -403,8 +399,8 @@ def main() -> None:
     network.reset_channel_state()
     report_compartment_breakdown(localisers, network, breakdown_rng)
 
-    plot_fingerprint_heatmap(network, radio_map, ap_order, metric="best_signal", layout="overlay")
-    plot_fingerprint_heatmap(network, radio_map, ap_order, metric="coverage", layout="side")
+    #plot_fingerprint_heatmap(network, radio_map, ap_order, metric="best_signal", layout="overlay")
+    #plot_fingerprint_heatmap(network, radio_map, ap_order, metric="coverage", layout="side")
 
 
     current_positions = {}
@@ -422,8 +418,14 @@ def main() -> None:
             "confidence": 0.85 if coordinate_guess is not None else 0.0,
         }
 
+
+    dispatcher = IncidentDispatchGraph(
+        employee_db=ROOT / "wrapper" / "Employees.db",
+        environment=environment,
+        model="gpt-4o",
+    )
     result = dispatcher.recommend(
-        incident="There is a small water spill on the floor.",
+        incident="Somebody pooped on the floor",
         incident_location="Laundry",
         current_positions=current_positions,
     )
