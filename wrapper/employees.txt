@@ -1,0 +1,7 @@
+# employee_id | name | role | skills (comma-separated) | available
+EMP001 | Maya Singh | Safety Officer | spill_response,hazmat,first_aid,fire_response | true
+EMP002 | Liam Chen | Maintenance Technician | spill_response,maintenance,electrical_isolation | true
+EMP003 | Sofia Patel | Steward | housekeeping,spill_response,passenger_assistance | true
+EMP004 | Noah Williams | Electrical Engineer | electrical,electrical_isolation,maintenance | true
+EMP005 | Grace Kim | Medical Officer | first_aid,medical_response | true
+EMP006 | Ethan Brown | Deck Officer | fire_response,evacuation,incident_command | true

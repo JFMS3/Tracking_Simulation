@@ -3,3 +3,6 @@ PyYAML
 matplotlib
 numpy
 scipy
+langgraph
+langchain-openai
+pydantic>=2
