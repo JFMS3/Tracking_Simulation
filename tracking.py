@@ -113,18 +113,118 @@ class GridTracker:
     def reset(self) -> None:
         self.belief = np.full(len(self.belief), 1.0 / len(self.belief))
 
-    def update(self, scan: Scan) -> LocalisationEstimate:
+    def update(self, scan: Optional[Scan], motion=None) -> LocalisationEstimate:
+        """One epoch. `scan` is None when no Wi-Fi scan arrived (predict only).
+        `motion` (an imu.MotionReading) is accepted for interface compatibility
+        with the fusion trackers and ignored here."""
         prior = self._predict_matrix @ self.belief
         prior = (1.0 - self.reacquire_probability) * prior + self.reacquire_probability / len(prior)
 
-        log_posterior = np.log(np.maximum(prior, 1e-300)) + self.localiser.log_likelihood(scan)
+        log_posterior = np.log(np.maximum(prior, 1e-300))
+        if scan is not None:
+            log_posterior = log_posterior + self.localiser.log_likelihood(scan)
 
         log_posterior -= log_posterior.max()
         posterior = np.exp(log_posterior)
         self.belief = posterior / posterior.sum()
 
-        heard = sum(1 for ap in self.localiser.access_points if scan.get(ap) is not None)
+        heard = 0 if scan is None else sum(1 for ap in self.localiser.access_points if scan.get(ap) is not None)
         return self.localiser.estimate_from_log_posterior(np.log(np.maximum(self.belief, 1e-300)), heard)
+
+
+class FixedLagSmoother:
+    """Fixed-lag forward-backward smoothing of a GridTracker (see docs/sensor_fusion_spec.md).
+
+    update(scan, motion) runs the wrapped tracker's forward step and returns the
+    smoothed estimate for epoch t - lag_steps (None until lag_steps epochs have
+    passed); flush() returns the smoothed estimates of the remaining epochs at
+    the end of a walk. evaluate_tracking aligns these via `delay_steps`.
+
+    The smoothing is exact for the HMM GridTracker implements, with transition
+    M = (1 - r) * P + r / n (P its wall-constrained motion kernel, r its
+    reacquire_probability, n cells) and emission exp(localiser.log_likelihood).
+    The smoothed marginal of epoch s given epochs 0..t is alpha_s * beta_s:
+    alpha_s is the tracker's own (normalised) filtered belief, and
+    beta_s = M^T (l_{s+1} * beta_{s+1}), beta_t = 1, is recomputed over the
+    last lag_steps epochs at every update and rescaled to sum 1 at each step,
+    which keeps it in floating-point range without changing the normalised
+    product. Each backward step is one sparse matrix-vector product (the r / n
+    term is a rank-one update), so an update costs O(lag_steps x nnz(P)).
+
+    This is the standard fixed-lag forward-backward recursion (research notes,
+    "fusion_filters_validation.md" Q3; Sarkka, Bayesian Filtering and
+    Smoothing). Smoothing over a full trajectory improved on causal filtering
+    by 34-60% in indoor trials (De Cock et al. 2021; Viol et al. IPIN 2012);
+    no source reports a lag sweep, and a lag of ~3-10 updates covers one
+    doorway transit. lag_steps = 0 is exactly the forward filter.
+
+    Call reset() before each walk; flush() at its end empties the window.
+    """
+
+    def __init__(self, tracker: GridTracker, lag_steps: int = 5):
+        if isinstance(lag_steps, bool) or int(lag_steps) != lag_steps or lag_steps < 0:
+            raise ValueError("lag_steps must be a non-negative integer")
+        self.tracker = tracker
+        self.localiser = tracker.localiser
+        self.lag_steps = int(lag_steps)
+        self.delay_steps = self.lag_steps
+        # backward step: M^T v = (1 - r) P^T v + (r / n) sum(v)
+        self._backward_matrix = tracker._predict_matrix.T.tocsr()
+        # (filtered belief alpha, scan likelihood scaled to max 1, APs heard) per pending epoch
+        self._window: List[tuple] = []
+
+    def reset(self) -> None:
+        self.tracker.reset()
+        self._window = []
+
+    def update(self, scan: Optional[Scan], motion=None) -> Optional[LocalisationEstimate]:
+        forward = self.tracker.update(scan, motion)
+        if scan is None:
+            likelihood = None  # no scan: a factor of 1 everywhere
+        else:
+            log_lik = self.localiser.log_likelihood(scan)
+            likelihood = np.exp(log_lik - log_lik.max())
+        self._window.append((self.tracker.belief.copy(), likelihood, forward.num_aps_used))
+
+        if len(self._window) <= self.lag_steps:
+            return None
+        return self._smoothed(self._backward_messages(1))[0]
+
+    def flush(self) -> List[LocalisationEstimate]:
+        """Smoothed estimates of every pending epoch, given all scans so far, oldest first."""
+        if not self._window:
+            return []
+        return self._smoothed(self._backward_messages(len(self._window)))
+
+    def _backward_messages(self, count: int) -> List[np.ndarray]:
+        """beta for the oldest `count` epochs in the window (oldest first), given the whole window."""
+        n = len(self._window[0][0])
+        r = self.tracker.reacquire_probability
+        beta = np.ones(n) / n
+        betas = []
+        for k in range(len(self._window) - 1, -1, -1):
+            if k < count:
+                betas.append(beta)
+            if k == 0:
+                break
+            likelihood = self._window[k][1]
+            v = beta if likelihood is None else likelihood * beta
+            beta = (1.0 - r) * (self._backward_matrix @ v) + (r / n) * v.sum()
+            total = beta.sum()
+            # only when the scan likelihood vanishes on every cell the walker could reach
+            beta = beta / total if total > 0 else np.full(n, 1.0 / n)
+        return betas[::-1]
+
+    def _smoothed(self, betas: List[np.ndarray]) -> List[LocalisationEstimate]:
+        """Estimates for the oldest len(betas) epochs; they leave the window."""
+        estimates = []
+        for (alpha, _, heard), beta in zip(self._window, betas):
+            marginal = alpha * beta
+            total = marginal.sum()
+            marginal = marginal / total if total > 0 else alpha
+            estimates.append(self.localiser.estimate_from_log_posterior(np.log(np.maximum(marginal, 1e-300)), heard))
+        del self._window[:len(betas)]
+        return estimates
 
 
 class SnapshotAsTracker:
@@ -136,8 +236,8 @@ class SnapshotAsTracker:
     def reset(self) -> None:
         pass
 
-    def update(self, scan: Scan) -> Optional[LocalisationEstimate]:
-        return self.localiser.locate(scan)
+    def update(self, scan: Optional[Scan], motion=None) -> Optional[LocalisationEstimate]:
+        return None if scan is None else self.localiser.locate(scan)
 
 
 def simulate_walk(
@@ -202,45 +302,76 @@ def evaluate_tracking(
     network: Network,
     walks: List[List[Coord]],
     rng: Random,
+    motions: Optional[List[list]] = None,
+    scan_masks: Optional[List[List[bool]]] = None,
 ) -> tuple[dict, dict]:
-    """Feed identical scan sequences to every tracker. Returns (stats, per-walk estimates)."""
+    """Feed identical scan (and motion) sequences to every tracker.
+
+    Tracker protocol: `reset()`, `update(scan, motion) -> Optional[LocalisationEstimate]`.
+    `scan` is None at epochs where `scan_masks[w][t]` is False (Wi-Fi outage;
+    no scan is simulated, so the random stream is not consumed). `motion` is
+    `motions[w][t]` (an imu.MotionReading for the interval ending at epoch t),
+    or None. A tracker with a `delay_steps` attribute (e.g. a fixed-lag
+    smoother) returns the estimate for epoch t - delay_steps and must provide
+    `flush()` returning its remaining estimates at the end of a walk; the
+    harness aligns these with the true positions before scoring.
+
+    Returns (stats, per-walk estimates). Stats per tracker: errors (sorted),
+    mean_err, median_err, p90_err, compartment_acc (misses count as wrong),
+    room_changes_ratio (1.0 = estimate changed compartment as often as the
+    person did), coverage95 (fraction of estimates carrying a covariance whose
+    true position lies inside the 95% ellipse; nan if none had one).
+    """
     environment = network.environment
-    records = {name: {"errors": [], "correct": 0, "total": 0, "est_changes": 0} for name in trackers}
+    records = {name: {"errors": [], "correct": 0, "total": 0, "est_changes": 0, "covered": 0, "with_cov": 0}
+               for name in trackers}
     estimates = {name: [] for name in trackers}
     true_changes = 0
 
-    for walk in walks:
+    for w, walk in enumerate(walks):
         network.reset_channel_state()
         for tracker in trackers.values():
             tracker.reset()
-        last_est_room = dict.fromkeys(trackers)
-        walk_estimates = {name: [] for name in trackers}
-        last_true_room = None
+        raw = {name: [] for name in trackers}
 
-        for true_pos in walk:
-            scan = network.scan(Receiver("crew", (*true_pos, 1.0)), rng)
-            true_room = environment.compartment_at(true_pos)
-            if last_true_room is not None and true_room != last_true_room:
-                true_changes += 1
-            last_true_room = true_room
-
+        for t, true_pos in enumerate(walk):
+            has_scan = scan_masks is None or scan_masks[w][t]
+            scan = network.scan(Receiver("crew", (*true_pos, 1.0)), rng) if has_scan else None
+            motion = None if motions is None else motions[w][t]
             for name, tracker in trackers.items():
-                est = tracker.update(scan)
-                rec = records[name]
+                raw[name].append(tracker.update(scan, motion))
+
+        true_rooms = [environment.compartment_at(p) for p in walk]
+        true_changes += sum(1 for a, b in zip(true_rooms, true_rooms[1:]) if a != b)
+
+        for name, tracker in trackers.items():
+            delay = getattr(tracker, "delay_steps", 0)
+            aligned = raw[name][delay:] + (list(tracker.flush()) if delay else [])
+            aligned = (aligned + [None] * len(walk))[:len(walk)]
+            rec = records[name]
+            last_est_room = None
+            walk_estimates = []
+            for true_pos, true_room, est in zip(walk, true_rooms, aligned):
                 rec["total"] += 1
                 if est is None:
-                    walk_estimates[name].append(None)
+                    walk_estimates.append(None)
                     continue
-                walk_estimates[name].append(est.position)
-                rec["errors"].append(math.dist(true_pos, est.position))
+                walk_estimates.append(est.position)
+                error = np.subtract(true_pos, est.position)
+                rec["errors"].append(math.hypot(*error))
                 est_room = environment.compartment_at(est.position)
                 rec["correct"] += est_room == true_room
-                if last_est_room[name] is not None and est_room != last_est_room[name]:
+                if last_est_room is not None and est_room != last_est_room:
                     rec["est_changes"] += 1
-                last_est_room[name] = est_room
-
-        for name in trackers:
-            estimates[name].append(walk_estimates[name])
+                last_est_room = est_room
+                if est.covariance is not None:
+                    rec["with_cov"] += 1
+                    try:
+                        nees = float(error @ np.linalg.solve(est.covariance + 1e-9 * np.eye(2), error))
+                        rec["covered"] += nees <= 5.991  # chi-square, 2 dof, 95%
+                    except np.linalg.LinAlgError:
+                        pass
+            estimates[name].append(walk_estimates)
 
     stats = {}
     for name, rec in records.items():
@@ -253,6 +384,7 @@ def evaluate_tracking(
             "compartment_acc": rec["correct"] / rec["total"],
             # 1.0 means the estimate changed compartment exactly as often as the person did
             "room_changes_ratio": rec["est_changes"] / max(true_changes, 1),
+            "coverage95": rec["covered"] / rec["with_cov"] if rec["with_cov"] else float("nan"),
         }
     return stats, estimates
 

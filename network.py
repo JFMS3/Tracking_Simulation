@@ -151,6 +151,12 @@ class Network:
     rtt_outlier_probability: float = 0.01
     rtt_nlos_outlier_probability: float = 0.08
     rtt_outlier_mean_m: float = 2.0
+    # Fixed, zero-mean range offset per AP (metres, standard deviation across
+    # APs): commodity FTM needs an empirically fitted correction per AP/phone
+    # pair, e.g. -10 to +0.65 m at 2.4 GHz/20 MHz (Bullmann et al., Sensors
+    # 2020). Drawn deterministically from (shadowing_seed, bssid), like the
+    # shadow field, so it never consumes scan randomness. 0 disables it.
+    rtt_ap_offset_std_m: float = 0.0
 
     _shadow_fields: dict[str, _SpatialShadowField] = field(
         default_factory=dict,
@@ -207,6 +213,7 @@ class Network:
             "rtt_nlos_bias_per_wall_m": self.rtt_nlos_bias_per_wall_m,
             "rtt_nlos_noise_per_wall_m": self.rtt_nlos_noise_per_wall_m,
             "rtt_weak_signal_penalty_m": self.rtt_weak_signal_penalty_m,
+            "rtt_ap_offset_std_m": self.rtt_ap_offset_std_m,
         }
         for name, value in non_negative.items():
             if not math.isfinite(value) or value < 0:
@@ -319,6 +326,23 @@ class Network:
         field_value = self._shadow_field(ap).value(receiver.position)
         self._shadow_value_cache[cache_key] = field_value
         return self.shadowing_std_db * field_value
+
+    def rtt_ap_offset(self, ap: AccessPoint) -> float:
+        """The AP's fixed RTT range offset in metres (0 when rtt_ap_offset_std_m is 0).
+
+        A deterministic function of (shadowing_seed, bssid) only, hash-seeded
+        like the shadow field: independent of AP order, of the other APs, and
+        of the scan random stream.
+        """
+
+        if self.rtt_ap_offset_std_m == 0.0:
+            return 0.0
+
+        digest = hashlib.blake2b(
+            f"{self.shadowing_seed}|rtt-ap-offset|{ap.bssid}".encode("utf-8"),
+            digest_size=16,
+        ).digest()
+        return self.rtt_ap_offset_std_m * Random(int.from_bytes(digest, "big")).gauss(0.0, 1.0)
 
     def _fast_fading_db(self, rng: Random) -> float:
         """Return zero-mean-in-dB averaged Rayleigh power fading."""
@@ -449,8 +473,13 @@ class Network:
         rng: Random,
         *,
         wall_count: int = 0,
+        ap_offset_m: float = 0.0,
     ) -> float:
-        """Simulate an FTM range error and convert the apparent range to RTT."""
+        """Simulate an FTM range error and convert the apparent range to RTT.
+
+        `ap_offset_m` is the link's fixed per-AP offset (see rtt_ap_offset);
+        it is deterministic and draws nothing from `rng`.
+        """
 
         weak_margin_db = max(self.rtt_weak_signal_threshold_dbm - rssi, 0.0)
         weak_signal_bias_m = self.rtt_weak_signal_penalty_m * (
@@ -463,6 +492,8 @@ class Network:
         range_error_m += self.rtt_range_bias_m
         range_error_m += wall_count * self.rtt_nlos_bias_per_wall_m
         range_error_m += weak_signal_bias_m
+        if ap_offset_m:
+            range_error_m += ap_offset_m
 
         outlier_probability = (
             self.rtt_nlos_outlier_probability if wall_count else self.rtt_outlier_probability
@@ -532,7 +563,13 @@ class Network:
             link_speed_mbps=link_speed_mbps,
             tx_mbps=link_speed_mbps,
             rx_mbps=link_speed_mbps,
-            rtt_ms=self.rtt(distance, sample.rssi_dbm, rng, wall_count=wall_count),
+            rtt_ms=self.rtt(
+                distance,
+                sample.rssi_dbm,
+                rng,
+                wall_count=wall_count,
+                ap_offset_m=self.rtt_ap_offset(ap),
+            ),
             noise_floor_dbm=round(sample.noise_floor_dbm, 2),
             snr_db=round(sample.snr_db, 2),
             mean_rssi_dbm=round(sample.mean_rssi_dbm, 2),

@@ -35,6 +35,36 @@ over time. Between scans, belief spreads by *walking distance* (the shortest
 route that does not pass through a wall), so it moves between compartments
 only through doorways.
 
+`FixedLagSmoother(tracker, lag_steps=5)` (tracking.py) wraps a `GridTracker`
+and returns, at epoch t, the estimate of epoch t - lag_steps given every scan
+up to t: exact forward-backward smoothing of the tracker's HMM over the last
+`lag_steps` epochs (normalised forward beliefs, backward messages rescaled at
+each step, one sparse matrix-vector product per step). `delay_steps` tells
+`evaluate_tracking` to align the delayed estimates, and `flush()` returns the
+last `lag_steps` estimates at the end of a walk. Lag 0 is the forward filter.
+Smoothing improved on causal filtering by 34-60% in indoor trials (De Cock et
+al. 2021; Viol et al. IPIN 2012), but no source reports a lag sweep; 5 s covers
+a doorway transit. On the deck it costs 5 s of latency for about 20% lower
+mean error (docs/sensor_fusion_spec.md, T5).
+
+`WallAwareLocaliser(..., rtt_nlos_mixture=True)` scores each RTT range with a
+two-component Gaussian mixture instead of a single Gaussian (or Cauchy) term:
+the usual LOS-like core plus, with weight 0.22, a component shifted +1.1 m and
+2 m wider. The weight and shift are Gentner et al.'s phone-measured FTM
+mixture (PLANS 2020: wide component p = 0.22, mean 1.13 m above the narrow
+one; it cut particle-filter error by 0.42-0.60 m); the extra spread follows the
+1-3 m proposed for NLOS excess delay and covers metre-level per-AP calibration
+residuals (Bullmann et al. 2020). It is applied to LOS and NLOS links alike
+(`rtt_mixture_los_weight=0` restricts it to links through a wall) and is off
+by default, which keeps the previous likelihood exactly. With realistic
+2.4 GHz RTT errors and 1.5 m per-AP offsets it lowers the hybrid snapshot's
+P90 error by about 25% (spec T7). **The gain is for single-scan (snapshot)
+estimates only: inside the trackers it made things worse** (held-out
+benchmark, 8 of 8 walks: GridTracker +11%, ParticleTracker +25% mean error,
+and lower coverage95), so keep it off there. Its +1.1 m shift also has the
+opposite sign to the realistic preset's -1.2 m instrument bias, so most of
+the snapshot gain comes from the wider component, not from bias correction.
+
 Both rely on the model in the `Network` they are given. `scenarios.py` tests
 them when that model is wrong (wall losses, path-loss exponent, RTT bias),
 when the phone has an RSSI offset, and with 2.4 GHz RTT errors closer to those
@@ -95,7 +125,12 @@ comparison.
 RTT first receives an error in metres and is then converted to round-trip time.
 Its model includes Gaussian LOS error, stable device bias, extra variance and
 positive bias per crossed wall, a smooth weak-signal penalty, and occasional
-positive outliers. This avoids the old discontinuous `+2 m` rule.
+positive outliers. This avoids the old discontinuous `+2 m` rule. Optionally
+(`rtt_ap_offset_std_m > 0`) each AP also gets a fixed range offset, drawn once
+from a zero-mean Gaussian with that standard deviation. Like the shadow field,
+it is a deterministic function of `(shadowing_seed, bssid)`, so it does not
+depend on AP order or consume the scan random stream; at the default 0 scans
+are exactly as before.
 
 Each successful `Reading` exposes `mean_rssi_dbm`, `shadowing_db`,
 `fast_fading_db`, `measurement_error_db`, `noise_floor_dbm`, `snr_db`,
@@ -113,6 +148,16 @@ naval-ship measurements found roughly 20 dB attenuation through a
 bulkhead/watertight door. The active preset therefore uses `n = 2.15`,
 `shadowing_std_db = 2.0`, and `20 dB` steel-wall loss as provisional central
 values.
+
+`rtt_ap_offset_std_m` defaults to 0 (offsets assumed calibrated out, as the
+layouts' nominal RTT model does). Uncalibrated commodity FTM is far worse:
+Bullmann et al. (Sensors 2020) had to fit per-AP corrections between -10 m and
++0.65 m at 2.4 GHz/20 MHz, Ibrahim et al. a 5.7 m offset for Intel 8260 pairs,
+and Horn reports pair offsets of 0.2-5.5 m. Offset correction roughly halved
+Bullmann's FTM error. The sensor-fusion target T7 uses 1.5 m, a modest
+residual after per-model calibration (it adds to the -1.2 m common device bias
+of the realistic 2.4 GHz preset); use several metres to model uncalibrated
+APs.
 
 For a real deployment, collect vessel measurements and fit parameters rather
 than tuning them until a chosen localiser looks good:
@@ -152,3 +197,12 @@ calibration setting from silently changing benchmark noise.
 - Wi-Fi RTT hardware, blocker, fluctuation, and outlier errors: [Yu et al.,
   *Error Investigation on Wi-Fi RTT in Commercial Consumer Devices*, Algorithms
   2022](https://doi.org/10.3390/a15120464).
+- Per-AP FTM offsets and NLOS errors behind metal doors at 2.4 GHz/20 MHz:
+  [Bullmann et al., Sensors
+  2020](https://pmc.ncbi.nlm.nih.gov/articles/PMC7472118/).
+- Gaussian-mixture RTT likelihood fitted to phone FTM errors in a particle
+  filter: [Gentner, Kuehner, Ulmschneider & Dammann (DLR), IEEE/ION PLANS
+  2020](https://elib.dlr.de/134078/1/ION_PLANS_2020.pdf).
+- Smoothing vs filtering indoors: [De Cock et al., Sensors
+  2021](https://pmc.ncbi.nlm.nih.gov/articles/PMC8271586); [Viol et al., IPIN
+  2012](https://www.comsys.rwth-aachen.de/fileadmin/papers/2012/2012-11-viol-ipin.pdf).

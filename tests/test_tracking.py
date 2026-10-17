@@ -296,7 +296,7 @@ class EvaluateTrackingTests(unittest.TestCase):
         first, _ = evaluate_tracking(self._make_trackers(), self.network, self.walks, Random(5))
         second, _ = evaluate_tracking(self._make_trackers(), self.network, self.walks, Random(5))
         self.assertEqual(first, second)
-        keys = {"errors", "mean_err", "median_err", "p90_err", "compartment_acc", "room_changes_ratio"}
+        keys = {"errors", "mean_err", "median_err", "p90_err", "compartment_acc", "room_changes_ratio", "coverage95"}
         for s in first.values():
             self.assertEqual(set(s), keys)
             self.assertTrue(0.0 <= s["compartment_acc"] <= 1.0)

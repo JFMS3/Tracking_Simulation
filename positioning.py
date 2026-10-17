@@ -260,6 +260,10 @@ class WallAwareLocaliser:
     GridTracker, where one bad scan would otherwise yank a confident belief
     across the deck (tracking.py).
 
+    `rtt_nlos_mixture=True` replaces the RTT term (Gaussian or Cauchy) with a
+    two-component Gaussian mixture: the usual LOS-like core plus a wide,
+    positively shifted component for excess delay (see _rtt_mixture_terms).
+
     Model parameters (path loss, wall losses, RTT bias/noise, noise floor) are
     read from `network`. Pass a separately configured Network to test a
     miscalibrated model against the true channel.
@@ -278,10 +282,21 @@ class WallAwareLocaliser:
         use_detections: bool = True,
         device_offset_sigma_db: Optional[float] = None,
         unexplained_miss_probability: float = 0.05,
+        rtt_nlos_mixture: bool = False,
+        rtt_mixture_nlos_weight: float = 0.22,
+        rtt_mixture_los_weight: float = 0.22,
+        rtt_mixture_shift_m: float = 1.1,
+        rtt_mixture_spread_m: float = 2.0,
     ):
         """`device_offset_sigma_db`: if set, every scan's RSSI may carry an unknown
         constant phone offset with this prior spread; it is estimated jointly with
-        position (per grid point) instead of being read as distance."""
+        position (per grid point) instead of being read as distance.
+
+        `rtt_nlos_mixture`: score RTT ranges with a two-component mixture
+        instead of the Gaussian/Cauchy loss. The `rtt_mixture_*` values
+        (weights of the wide component on links through >= 1 wall and on LOS
+        links, its shift and extra spread in metres) only matter when it is on;
+        see _rtt_mixture_terms for their literature basis."""
         if measurement not in self.MEASUREMENTS:
             raise ValueError(f"Unknown measurement: {measurement!r}. Use one of {self.MEASUREMENTS}")
         if grid_spacing_m <= 0 or rssi_sigma_db <= 0:
@@ -292,6 +307,12 @@ class WallAwareLocaliser:
             raise ValueError("unexplained_miss_probability must be between 0 and 1")
         if not np.isfinite(receiver_height_m):
             raise ValueError("receiver_height_m must be finite")
+        if not (0.0 <= rtt_mixture_nlos_weight < 1.0 and 0.0 <= rtt_mixture_los_weight < 1.0):
+            raise ValueError("rtt_mixture_nlos_weight and rtt_mixture_los_weight must be in [0, 1)")
+        if not np.isfinite(rtt_mixture_shift_m):
+            raise ValueError("rtt_mixture_shift_m must be finite")
+        if not (np.isfinite(rtt_mixture_spread_m) and rtt_mixture_spread_m > 0):
+            raise ValueError("rtt_mixture_spread_m must be a positive finite number")
 
         self.measurement = measurement
         self.rssi_sigma_db = rssi_sigma_db
@@ -332,6 +353,68 @@ class WallAwareLocaliser:
             0.1,
         )
         self._detection_threshold_dbm = self._detection_threshold(network)
+
+        self.rtt_nlos_mixture = rtt_nlos_mixture
+        self.rtt_mixture_nlos_weight = rtt_mixture_nlos_weight
+        self.rtt_mixture_los_weight = rtt_mixture_los_weight
+        self.rtt_mixture_shift_m = rtt_mixture_shift_m
+        self.rtt_mixture_spread_m = rtt_mixture_spread_m
+        if rtt_nlos_mixture:
+            self._rtt_mixture_terms(wall_count)
+
+    def _rtt_mixture_terms(self, wall_count: np.ndarray) -> None:
+        """Precompute, per (grid point, AP), the two-component RTT range likelihood
+
+            p(e) = (1 - w) N(e; 0, sigma^2) + w N(e; shift, sigma^2 + spread^2),
+
+        e = measured range - _expected_range, sigma = _range_sigma. The core is
+        the existing LOS-like Gaussian (the expected range already contains the
+        modelled per-wall NLOS bias). The second component is the excess delay
+        the deterministic model cannot predict: positively biased and wide.
+
+        Literature basis (research_notes, fusion_filters_validation.md Q4;
+        ftm_nlos_fusion.md):
+        - Shape and weight: Gentner et al. (PLANS 2020) fitted a two-component
+          mixture to Pixel 3 FTM errors (AIC/BIC chose K = 2): a narrow
+          component (p = 0.78, sigma 0.46 m) and a wide one (p = 0.22,
+          sigma 1.14 m) whose mean is 1.13 m *above* the narrow one. Hence
+          w = 0.22 and shift = 1.1 m by default. Replacing a Gaussian with that
+          mixture cut particle-filter mean error by 0.42-0.60 m.
+        - Width: the wide component must also absorb the long positive NLOS tail
+          behind metal (about +10-20 m behind fire doors, Bullmann et al.,
+          Sensors 2020) and per-AP calibration residuals of metres (Bullmann:
+          offsets -10 to +0.65 m at 2.4 GHz/20 MHz). The notes propose an NLOS
+          spread of 1-3 m; spread = 2 m (so sigma_wide = sqrt(sigma^2 + 4)).
+        - The same weight is used for LOS and NLOS links by default because
+          Gentner's fit came from a mostly-LOS room: the wide component is
+          present on every link. Set rtt_mixture_los_weight = 0 for a mixture on
+          NLOS links only (links whose ray crosses >= 1 wall).
+        Mapping onto the simulator (network.Network.rtt): its unmodelled errors
+        are the exponential NLOS/LOS outliers (mean rtt_outlier_mean_m = 2 m,
+        probability 8% / 1%), the weak-signal penalty, and in the realistic
+        2.4 GHz scenarios a -1.2 m device bias, 1.5 m noise and per-AP offsets
+        (rtt_ap_offset_std_m). A sigma_wide of 2-2.3 m at a +1.1 m shift covers
+        an exponential outlier of mean 2 m and +-1.5 m offsets, while the core
+        keeps the nominal model's precision for well-behaved links.
+
+        Constants shared by both components (the 1/sqrt(2 pi)) are dropped, as
+        in the plain term. Stored in log space and combined with logaddexp.
+        """
+        weight = np.where(wall_count > 0, self.rtt_mixture_nlos_weight, self.rtt_mixture_los_weight)
+        sigma = self._range_sigma
+        self._mixture_wide_sigma = np.sqrt(sigma ** 2 + self.rtt_mixture_spread_m ** 2)
+        self._mixture_log_core = np.log1p(-weight) - np.log(sigma)
+        with np.errstate(divide="ignore"):  # weight 0 -> -inf: the core alone
+            self._mixture_log_wide = np.log(weight) - np.log(self._mixture_wide_sigma)
+
+    def _rtt_mixture_log_likelihood(self, measured_range: float, j: int) -> np.ndarray:
+        """Mixture log-likelihood of one measured range at every grid point (AP index j)."""
+        sigma = self._range_sigma[:, j]
+        error = measured_range - self._expected_range[:, j]
+        core = self._mixture_log_core[:, j] - 0.5 * (error / sigma) ** 2
+        wide_sigma = self._mixture_wide_sigma[:, j]
+        wide = self._mixture_log_wide[:, j] - 0.5 * ((error - self.rtt_mixture_shift_m) / wide_sigma) ** 2
+        return np.logaddexp(core, wide)
 
     @staticmethod
     def _build_grid(network: Network, spacing: float) -> tuple[np.ndarray, np.ndarray]:
@@ -431,7 +514,9 @@ class WallAwareLocaliser:
             if uses_rssi:
                 rssi_residuals.append(reading.rssi_dbm - self._expected_rssi[:, j])
 
-            if self.measurement in ("rtt", "hybrid"):
+            if self.measurement in ("rtt", "hybrid") and self.rtt_nlos_mixture:
+                log_lik += self._rtt_mixture_log_likelihood(self._measured_range(reading), j)
+            elif self.measurement in ("rtt", "hybrid"):
                 sigma = self._range_sigma[:, j]
                 residual = (self._measured_range(reading) - self._expected_range[:, j]) / sigma
                 log_lik -= self._loss(residual) + np.log(sigma)
