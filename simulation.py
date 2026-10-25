@@ -19,8 +19,13 @@ from simulator.calibration import build_radio_map
 from simulator.evaluation import EvaluationSession, create_evaluation_session
 from simulator.network import Network, Receiver
 from typing import List, Optional, Sequence
+from dotenv import load_dotenv
+from wrapper.incident_dispatch import IncidentDispatchGraph
 
 Metric = str
+ROOT = Path(__file__).resolve().parent
+load_dotenv(ROOT / ".env")
+
 
 def display_network(network: Network) -> None:
     import matplotlib.pyplot as plt
@@ -316,6 +321,39 @@ def plot_fingerprint_heatmap(
     return fig
  
 
+def get_coordinate_guess(network: Network, receiver: Receiver, rng, localisers) -> Optional[tuple[float, float]]:
+    scan = network.scan(receiver, rng)
+    nearest_ap_estimate = localisers.get("NearestAP").locate(scan)
+    weighted_power_estimate = localisers.get("WeightedCentroidPower").locate(scan)
+    fingerprint_estimate = localisers.get("Fingerprint").locate(scan)
+    rtt_estimate = localisers.get("RTT").locate(scan)
+
+    if rtt_estimate is not None:
+        weighted_estimates = [
+            (nearest_ap_estimate, 0.1),
+            (weighted_power_estimate, 0.2),
+            (fingerprint_estimate, 0.4),
+            (rtt_estimate, 0.3),
+        ]
+    else:
+        weighted_estimates = [
+            (nearest_ap_estimate, 0.1),
+            (weighted_power_estimate, 0.3),
+            (fingerprint_estimate, 0.6),
+        ]
+
+    available = [
+        (estimate.position, weight)
+        for estimate, weight in weighted_estimates
+        if estimate is not None
+    ]
+    if not available:
+        return None
+
+    coords, weights = zip(*available)
+    average = np.average(coords, axis=0, weights=weights)
+    return float(average[0]), float(average[1])
+
 
 
 def _positive_int(value: str) -> int:
@@ -365,13 +403,16 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     ap3 = AccessPoint("Router3", "26:4f:d0:fb:85:c0", (8.0, 3.0, 0.5), 2412)
     ap4 = AccessPoint("Router4", "27:A0:d0:fb:85:c4", (5.0, 6.2, 1.0), 2412)
     ap5 = AccessPoint("Router5", "28:25:d0:fb:85:c0", (6.8, 4.5, 0.5), 2412)
-    re1 = Receiver("Phone-Desk", (3, 5.9, 0.7))
-    re2 = Receiver("Phone-Engine", (2, 1, 1))
+    re1 = Receiver("EMP001", (3, 5.9, 0.7))
+    re2 = Receiver("EMP002", (2, 1, 1))
+    re3 = Receiver("EMP003", (3, 5, 1))
+    re4 = Receiver("EMP004", (1, 3, 2))
+
 
     network = Network.from_config(
         layout_path,
         access_points=[ap1, ap2, ap3, ap4, ap5],
-        receivers=[re1, re2],
+        receivers=[re1, re2, re3, re4],
     )
     environment = network.environment
 
@@ -446,13 +487,13 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         return estimate.position if estimate is not None else None
 
     for i in range(10):
-        re1_coordinate_guess = get_coordinate_guess(re1)
+        re1_coordinate_guess = get_coordinate_guess(network, re1, demo_rng, localisers)
         re1_compartment_guess = (
             environment.compartment_at(re1_coordinate_guess)
             if re1_coordinate_guess is not None
             else None
         ) or "Unknown"
-        re2_coordinate_guess = get_coordinate_guess(re2)
+        re2_coordinate_guess = get_coordinate_guess(network, re2, demo_rng, localisers)
         re2_compartment_guess = (
             environment.compartment_at(re2_coordinate_guess)
             if re2_coordinate_guess is not None
@@ -479,6 +520,10 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         plot_fingerprint_heatmap(network, radio_map, ap_order, metric="best_signal", layout="overlay")
         plot_fingerprint_heatmap(network, radio_map, ap_order, metric="coverage", layout="side")
 
+    try:
+        print(result['rationale'])
+    except:
+        print(result)
 
 if __name__ == "__main__":
     main()
