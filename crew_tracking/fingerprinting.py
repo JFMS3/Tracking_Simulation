@@ -13,7 +13,7 @@ from typing import Sequence
 
 import numpy as np
 
-from .models import AccessPoint, Coord, LocalisationEstimate, Scan
+from .models import AccessPoint, Coord, FingerprintQuality, LocalisationEstimate, Scan
 
 
 DEFAULT_FLOOR_DBM = -100.0
@@ -74,11 +74,18 @@ class _FingerprintBase:
         if not np.isfinite(self._map_matrix).all() or not np.isfinite(self._positions).all():
             raise ValueError("Radio-map positions and RSSI vectors must be finite")
 
-    def _nearest(self, scan: Scan) -> tuple[np.ndarray, np.ndarray, int] | None:
+    def _distances(self, scan: Scan) -> tuple[np.ndarray, int] | None:
         live_vector, heard = _signal_vector(self.ap_order, scan, self.floor_dbm)
         if heard == 0:
             return None
         distances = np.linalg.norm(self._map_matrix - live_vector, axis=1)
+        return distances, heard
+
+    def _nearest(self, scan: Scan) -> tuple[np.ndarray, np.ndarray, int] | None:
+        matched = self._distances(scan)
+        if matched is None:
+            return None
+        distances, heard = matched
         # Stable sorting makes ties deterministic in radio-map order.
         nearest = np.argsort(distances, kind="stable")[:self.k]
         return nearest, distances[nearest], heard
@@ -91,20 +98,50 @@ class FingerprintLocaliser(_FingerprintBase):
     Missing APs use the configured RSSI floor. Unknown APs are ignored.
     """
 
+    def __init__(
+        self,
+        radio_map: Sequence[FingerprintEntry],
+        ap_order: Sequence[AccessPoint],
+        k: int = 3,
+        floor_dbm: float = DEFAULT_FLOOR_DBM,
+        *,
+        ambiguity_margin_db: float = 2.0,
+    ):
+        super().__init__(radio_map, ap_order, k, floor_dbm)
+        if not math.isfinite(ambiguity_margin_db) or ambiguity_margin_db <= 0:
+            raise ValueError("ambiguity_margin_db must be finite and positive")
+        self.ambiguity_margin_db = ambiguity_margin_db
+
     def locate(self, scan: Scan) -> LocalisationEstimate | None:
-        matched = self._nearest(scan)
+        matched = self._distances(scan)
         if matched is None:
             return None
-        nearest, distances, heard = matched
+        all_distances, heard = matched
+        nearest = np.argsort(all_distances, kind="stable")[:self.k]
+        distances = all_distances[nearest]
         points = self._positions[nearest]
         weights = 1.0 / np.maximum(distances, 1e-3) ** 2
         weights /= weights.sum()
         centre = np.average(points, axis=0, weights=weights)
         delta = points - centre
+        # Search beyond the k selected points: two distant clusters can have
+        # indistinguishable RSSI while the chosen neighbours have tiny spread.
+        # This is a heuristic ambiguity indicator, not a probability model.
+        rms_distances = all_distances / math.sqrt(heard)
+        plausible = rms_distances <= rms_distances[nearest[0]] + self.ambiguity_margin_db
+        ambiguity_spread = float(np.sqrt(np.mean(
+            np.sum((self._positions[plausible] - centre) ** 2, axis=1)
+        )))
         return LocalisationEstimate(
             position=(float(centre[0]), float(centre[1])),
             covariance=(delta.T * weights) @ delta,
             num_aps_used=heard,
+            quality=FingerprintQuality(
+                match_rms_db=float(rms_distances[nearest[0]]),
+                neighbour_spread_m=float(np.sqrt(np.sum(weights * np.sum(delta ** 2, axis=1)))),
+                ambiguity_spread_m=ambiguity_spread,
+                observed_ap_fraction=heard / len(self.ap_order),
+            ),
         )
 
 

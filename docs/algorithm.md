@@ -4,6 +4,11 @@ The `crew_tracking` package consumes measurements and surveyed AP positions.
 It has no dependence on simulated receivers, walls, random channels, calibration
 scans, plots, or YAML. Those belong to `simulator` and `simulation.py`.
 
+The end-to-end `FusionLocaliser` now uses observable fingerprint and FTM quality
+to select weights, with RSSI centroid/nearest-AP fallbacks. See
+[quality-aware fusion](fusion.md) for its formulas, diagnostics, provisional
+defaults and survey-to-use validation requirements.
+
 ## FTM timing and units
 
 `FTMExchange` represents one successful hardware exchange using the convention

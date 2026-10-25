@@ -89,10 +89,45 @@ Scan = dict[AccessPoint, Optional[Reading]]
 
 
 @dataclass
+class FingerprintQuality:
+    """Observable match diagnostics, not a calibrated position uncertainty."""
+
+    match_rms_db: float
+    neighbour_spread_m: float
+    ambiguity_spread_m: float
+    observed_ap_fraction: float
+
+
+@dataclass
+class FTMQuality:
+    """Range-fit diagnostics computed without knowledge of LOS/NLOS truth."""
+
+    residual_rms_m: float
+    geometry_dilution: float
+    range_std_rms_m: float
+    retained_fraction: float
+    min_samples_per_ap: int
+    at_bound: bool = False
+
+
+@dataclass
+class FusionQuality:
+    """Explain a fusion decision; scales are heuristic, not confidence bounds."""
+
+    decision: str
+    fingerprint_weight: float = 0.0
+    ftm_weight: float = 0.0
+    fingerprint_scale_m: Optional[float] = None
+    ftm_scale_m: Optional[float] = None
+    separation_m: Optional[float] = None
+
+
+@dataclass
 class LocalisationEstimate:
     position: Coord
     covariance: Optional[np.ndarray] = None
     num_aps_used: int = 0
+    quality: FingerprintQuality | FTMQuality | FusionQuality | None = None
 
 
 class Localiser(Protocol):

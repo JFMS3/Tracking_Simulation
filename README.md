@@ -11,6 +11,7 @@ biases, and fits a robust weighted position using surveyed AP heights.
 crew_tracking/           Algorithms: no simulator, geometry, YAML, or plot imports
   models.py             Measurement contracts, APs, estimates, path-loss parameters
   ftm.py                Timestamp conversion, burst processing, weighted positioning
+  fusion.py             End-to-end fusion localiser used by the simulator benchmark
   positioning.py        Nearest AP, centroids, RSS and legacy RTT baselines
   fingerprinting.py     Radio-map entries and fingerprint estimators
 simulator/              Synthetic measurements and survey generation
@@ -84,6 +85,45 @@ receiver height is 1 m; the demonstration phone at 0.7 m intentionally has a
 height mismatch. Burst filtering and robust loss reduce isolated errors but do
 not remove every persistent NLOS bias. See [algorithm notes](docs/algorithm.md)
 for equations, calibration, covariance limitations, and verified references.
+
+The `Fusion` benchmark row uses observable quality to combine fingerprint and
+FTM positions. Fingerprint mismatch, spatial ambiguity and observed AP support
+affect its weight; range residuals, geometry, burst retention and bounds affect
+FTM's weight. Nearest-AP and power-centroid are fallbacks when both primary
+methods fail. `Fixed Fusion` retains the previous 10/20/40/30 weighted blend for
+a paired comparison. Both methods receive the same scan.
+
+These are provisional engineering quality scores, not learned field accuracy
+or confidence intervals. Persistent NLOS bias or an outdated radio map can
+still look internally consistent. See [fusion details](docs/fusion.md) for the
+formulas, defaults, hardware requirements and limitations.
+
+## Compare fusion under survey-to-use changes
+
+From this directory, using the existing virtual environment:
+
+```powershell
+& .\.venv\Scripts\python.exe simulation.py --no-plots --trials 300 --evaluation-profile matched --seed 73129
+& .\.venv\Scripts\python.exe simulation.py --no-plots --trials 300 --evaluation-profile deployment --seed 73129
+```
+
+`matched` is the default optimistic reference: survey and use share the fixed
+shadow field and device calibration. `deployment` is an explicitly assumed
+sensitivity test: a separate shadow field, +4 dB receiver reporting offset,
+per-AP reporting drift in [-3,+3] dB, 1.3 m actual receiver height against a
+1.0 m assumption, one visible AP removed on 10% of scans, and +0.5 m persistent
+FTM range bias. Reporting offsets occur after beacon detection; they do not
+change physical reception. These magnitudes are not fitted vessel measurements.
+The scenario description is printed with every run.
+
+Calibration stays fixed when `--seed` changes. Repeat with other seeds and
+compare both error and miss rate. For a coarser survey add
+`--grid-spacing 1 --calibration-samples 5`. Simulated channel diagnostics are
+stripped before all benchmark/demo localisers receive ordinary `Reading`
+objects. True coordinates are used only to generate and score measurements.
+Overall statistics and compartment breakdown use separate trial batches.
+Pre-generating evaluation positions makes profile comparisons reproducible;
+the new seeded runs therefore differ from historical benchmark numbers.
 
 ## Migration from the original flat modules
 
@@ -206,21 +246,21 @@ calibration setting from silently changing benchmark noise.
 ## Research basis
 
 - FTM and positioning algorithm references: [algorithm notes](docs/algorithm.md).
-- Shipboard path loss: [Kdouh et al., *Measurements and Path Loss Models for
-  Shipboard Environments at 2.4 GHz*, EuMC
+- Shipboard path loss: [Kdouh et al., _Measurements and Path Loss Models for
+  Shipboard Environments at 2.4 GHz_, EuMC
   2011](https://doi.org/10.23919/EuMC.2011.6101828).
-- Bulkhead loss and non-Ricean ship channels: [Estes et al., *Shipboard Radio
-  Frequency Propagation Measurements for Wireless Networks*, MILCOM
+- Bulkhead loss and non-Ricean ship channels: [Estes et al., _Shipboard Radio
+  Frequency Propagation Measurements for Wireless Networks_, MILCOM
   2001](https://experts.boisestate.edu/en/publications/shipboard-radio-frequency-propagation-measurements-for-wireless-n/).
-- Exponentially correlated shadowing: [Gudmundson, *Correlation Model for
-  Shadow Fading in Mobile Radio Systems*, Electronics Letters
+- Exponentially correlated shadowing: [Gudmundson, _Correlation Model for
+  Shadow Fading in Mobile Radio Systems_, Electronics Letters
   1991](https://doi.org/10.1049/el:19911328).
-- Rayleigh fading in metallic ferry compartments: [Cardoso et al., *Fast Fading
+- Rayleigh fading in metallic ferry compartments: [Cardoso et al., _Fast Fading
   Characterization for Body Area Networks in Circular Metallic Indoor
-  Environments*, IEEE Access
+  Environments_, IEEE Access
   2020](https://doi.org/10.1109/ACCESS.2020.2977425).
 - Indoor propagation and received-level autocorrelation: [ITU-R
   P.1238-13](https://www.itu.int/rec/R-REC-P.1238-13-202509-I/en).
 - Wi-Fi RTT hardware, blocker, fluctuation, and outlier errors: [Dong et al.,
-  *Error Investigation on Wi-Fi RTT in Commercial Consumer Devices*, Algorithms
+  _Error Investigation on Wi-Fi RTT in Commercial Consumer Devices_, Algorithms
   2022](https://doi.org/10.3390/a15120464).

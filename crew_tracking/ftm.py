@@ -16,7 +16,7 @@ import numpy as np
 from scipy.optimize import least_squares
 
 from .models import (
-    Coord, FTMBurst, FTMSample, LocalisationEstimate, Scan, SPEED_OF_LIGHT,
+    Coord, FTMBurst, FTMQuality, FTMSample, LocalisationEstimate, Scan, SPEED_OF_LIGHT,
 )
 
 _MAD_NORMAL_SCALE = 1.482602218505602
@@ -196,6 +196,7 @@ class FTMLocaliser:
             if previous != ap.position:
                 return None
         positions, distances, uncertainties = [], [], []
+        sample_counts, original_sample_counts = [], []
         seen_bssids: set[str] = set()
         for ap, reading in scan.items():
             if reading is None or reading.ftm_burst is None or not ap.ftm_responder:
@@ -214,6 +215,8 @@ class FTMLocaliser:
             positions.append(ap.position)
             distances.append(estimate.distance_m)
             uncertainties.append(estimate.std_m)
+            sample_counts.append(estimate.num_samples)
+            original_sample_counts.append(len(reading.ftm_burst.samples))
         if len(positions) < self.config.min_aps:
             return None
 
@@ -279,8 +282,38 @@ class FTMLocaliser:
                 return None
             if not np.isfinite(covariance).all():
                 covariance = None
+
+        # Keep metre residuals before robust loss/whitening: a stable but
+        # biased burst can fit poorly even when its sample variance is small.
+        # Geometry uses surveyed anchors and assumed receiver height only;
+        # neither robust-loss curvature nor simulator LOS labels enter it.
+        fitted_ranges = predicted(result.x)
+        geometric_jacobian = (result.x - xy) / np.maximum(
+            fitted_ranges, np.finfo(float).eps,
+        )[:, None]
+        geometry_dilution = math.inf
+        geometry_singular_values = np.linalg.svd(geometric_jacobian, compute_uv=False)
+        if geometry_singular_values[-1] > (
+            np.finfo(float).eps * max(geometric_jacobian.shape) * geometry_singular_values[0]
+        ):
+            try:
+                geometry_inverse = np.linalg.inv(geometric_jacobian.T @ geometric_jacobian)
+                geometry_trace = float(np.trace(geometry_inverse))
+                if math.isfinite(geometry_trace) and geometry_trace > 0:
+                    geometry_dilution = math.sqrt(geometry_trace)
+            except np.linalg.LinAlgError:
+                pass
+        quality = FTMQuality(
+            residual_rms_m=float(np.sqrt(np.mean((fitted_ranges - ranges) ** 2))),
+            geometry_dilution=geometry_dilution,
+            range_std_rms_m=float(np.sqrt(np.mean(stds ** 2))),
+            retained_fraction=sum(sample_counts) / sum(original_sample_counts),
+            min_samples_per_ap=min(sample_counts),
+            at_bound=bool(np.any(result.active_mask)),
+        )
         return LocalisationEstimate(
             position=(float(result.x[0]), float(result.x[1])),
             covariance=covariance,
             num_aps_used=len(positions),
+            quality=quality,
         )
