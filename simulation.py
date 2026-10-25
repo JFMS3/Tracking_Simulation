@@ -343,7 +343,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--no-plots", action="store_true", help="Run benchmarks without plot windows")
     parser.add_argument("--trials", type=_positive_int, default=300,
-                        help="Trials per compartment in each benchmark (default: 300)")
+                        help="Trials per compartment in random-point benchmarks; unused with --tracking (default: 300)")
     parser.add_argument("--grid-spacing", type=_positive_float, default=0.3,
                         help="Fingerprint survey grid spacing in metres (default: 0.3)")
     parser.add_argument("--calibration-samples", type=_positive_int, default=15,
@@ -352,6 +352,8 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                         help="Matched reference or survey-to-use sensitivity test (default: matched)")
     parser.add_argument("--seed", type=_nonnegative_int, default=45678,
                         help="Evaluation random seed; calibration stays fixed (default: 45678)")
+    parser.add_argument("--tracking", action="store_true",
+                        help="Compare Fusion with Kalman tracking on timestamped routes instead of random points")
     args = parser.parse_args(argv)
 
     radio_map_rng = Random(12345)
@@ -438,6 +440,12 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         "FTM": ftm_localiser,
         "Fingerprint": fingerprint_localiser,
     }
+
+    if args.tracking:
+        from simulator.tracking import report_tracking_benchmark
+
+        report_tracking_benchmark(fusion_localiser, network, evaluation, seed=args.seed)
+        return
 
     def get_coordinate_guess(receiver: Receiver) -> Optional[tuple[float, float]]:
         """Run the same fusion localiser that is evaluated by the benchmark."""

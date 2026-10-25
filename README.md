@@ -12,12 +12,14 @@ crew_tracking/           Algorithms: no simulator, geometry, YAML, or plot impor
   models.py             Measurement contracts, APs, estimates, path-loss parameters
   ftm.py                Timestamp conversion, burst processing, weighted positioning
   fusion.py             End-to-end fusion localiser used by the simulator benchmark
+  tracking.py           Timestamped per-device Kalman position/velocity tracking
   positioning.py        Nearest AP, centroids, RSS and legacy RTT baselines
   fingerprinting.py     Radio-map entries and fingerprint estimators
 simulator/              Synthetic measurements and survey generation
   environment.py        Ship geometry and YAML layout loading
   network.py            Channel, receiver truth, diagnostics, synthetic FTM bursts
   calibration.py        Simulated RSSI radio-map survey
+  tracking.py           Paired journeys, outages and tracking validation metrics
 simulation.py           Composition, reports, plots, command-line entry point
 layouts/                Simulation configuration
 tests/                  Algorithm, channel, integration, and dependency tests
@@ -124,6 +126,36 @@ objects. True coordinates are used only to generate and score measurements.
 Overall statistics and compartment breakdown use separate trial batches.
 Pre-generating evaluation positions makes profile comparisons reproducible;
 the new seeded runs therefore differ from historical benchmark numbers.
+
+## Track Fusion positions over time
+
+The optional Kalman layer consumes Fusion coordinates and real capture times.
+It keeps separate `[x, y, vx, vy]` state per device, handles irregular scan
+intervals, rejects isolated jumps and predicts briefly through missing fixes.
+Predictions stop being returned after 3 seconds without an accepted fix; an
+update after 10 seconds resets the track. Defaults are provisional. Source
+Fusion quality/covariance is not silently treated as calibrated measurement
+noise. See [tracking API, mathematics and validation](docs/tracking.md).
+
+Run the temporal benchmark instead of the independent random-point benchmark:
+
+```powershell
+& .\.venv\Scripts\python.exe simulation.py --tracking --no-plots --evaluation-profile matched --seed 73129
+& .\.venv\Scripts\python.exe simulation.py --tracking --no-plots --evaluation-profile deployment --seed 73129
+```
+
+`--tracking` prints temporal results for continuous walks, stops, right-angle
+turns and explicit short/long fix-delivery outages. It replays the same cached
+Fusion fixes through raw and filtered paths. It reports paired position error,
+availability, stationary jitter and absolute error, turn-window error, separate
+prediction-only error during gaps, and recovery time. `--trials` is unused in
+this mode; survey spacing/samples and evaluation profile/seed still apply.
+The temporal benchmark prints tables and does not open plot windows.
+
+Routes stay within each compartment because the layout has no doorway data.
+The tracker does not enforce walls or remove persistent bias. Mathematical and
+synthetic tests validate implementation behaviour; vessel recordings are needed
+to establish real tracking accuracy, lag and noise settings.
 
 ## Migration from the original flat modules
 
