@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "crew-tracking"
+version = "0.1.0"
+description = "Measurement-based indoor localisation and a separate ship radio simulator"
+requires-python = ">=3.10"
+dependencies = ["numpy>=1.23", "scipy>=1.9"]
+
+[project.optional-dependencies]
+simulation = ["PyYAML>=6", "shapely>=2", "matplotlib>=3.6"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["crew_tracking*", "simulator*"]
+

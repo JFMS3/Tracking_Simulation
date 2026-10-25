@@ -1,15 +1,23 @@
+"""Simulation composition, benchmarks, and plotting; algorithms live in crew_tracking."""
+
+import argparse
 import math
 from pathlib import Path
 from random import Random
 
-import matplotlib.pyplot as plt
-import matplotlib.patheffects as pe
 import numpy as np
 
-from network import Network, AccessPoint, Receiver
-from environment import ShipEnvironment
-from positioning import NearestAPLocaliser, WeightedCentroidLocaliser, RSSTrilaterationLocaliser, RTTTrilaterationLocaliser
-from fingerprinting import FingerprintEntry, build_radio_map, FingerprintLocaliser, FingerprintCompartmentLocaliser
+from crew_tracking.models import AccessPoint, PathLossModel
+from crew_tracking.ftm import FTMLocaliser
+from crew_tracking.fusion import FixedWeightFusionLocaliser, FusionLocaliser
+from crew_tracking.positioning import (
+    NearestAPLocaliser, WeightedCentroidLocaliser,
+    RSSTrilaterationLocaliser, RTTTrilaterationLocaliser,
+)
+from crew_tracking.fingerprinting import FingerprintEntry, FingerprintLocaliser
+from simulator.calibration import build_radio_map
+from simulator.evaluation import EvaluationSession, create_evaluation_session
+from simulator.network import Network, Receiver
 from typing import List, Optional, Sequence
 from dotenv import load_dotenv
 from wrapper.incident_dispatch import IncidentDispatchGraph
@@ -20,6 +28,8 @@ load_dotenv(ROOT / ".env")
 
 
 def display_network(network: Network) -> None:
+    import matplotlib.pyplot as plt
+
     environment = network.environment
     fig, ax = plt.subplots()
 
@@ -70,8 +80,15 @@ def display_network(network: Network) -> None:
     plt.show()
 
 
-def report_ap_coverage(network: Network, rng: Random, n_trials: int = 300) -> None:
+def report_ap_coverage(
+    network: Network,
+    rng: Random,
+    n_trials: int = 300,
+    *,
+    evaluation_session: Optional[EvaluationSession] = None,
+) -> None:
     environment = network.environment
+    evaluation = evaluation_session or create_evaluation_session(network)
     print("=== AP coverage (avg valid readings per scan, out of "
           f"{len(network.access_points)}) ===")
     for comp in environment.compartments:
@@ -79,7 +96,7 @@ def report_ap_coverage(network: Network, rng: Random, n_trials: int = 300) -> No
         for _ in range(n_trials):
             pos = environment.random_point_in(comp.name, rng)
             receiver = Receiver("probe", (*pos, 1.0))
-            scan = network.scan(receiver, rng)
+            scan = evaluation.scan(receiver, rng)
             valid_counts.append(sum(1 for r in scan.values() if r is not None))
         avg = sum(valid_counts) / len(valid_counts)
         print(f"{comp.name:<15} avg valid APs: {avg:.2f}   (min seen: {min(valid_counts)})")
@@ -91,20 +108,29 @@ def report_localiser_stats(
     network: Network,
     rng: Random,
     n_trials_per_compartment: int = 300,
+    *,
+    evaluation_session: Optional[EvaluationSession] = None,
 ) -> None:
     environment = network.environment
+    evaluation = evaluation_session or create_evaluation_session(network)
     print("=== Localiser performance across ALL compartments ===")
     header = f"{'Method':<24}{'Mean err':<10}{'Median err':<12}{'P90 err':<10}{'Miss rate':<11}{'Compartment acc':<16}"
     print(header)
 
     # Every method must see the same locations and the same stochastic scans;
     # otherwise differences in fading/dropout are confounded with the method.
-    trials = []
+    locations = []
     for comp in environment.compartments:
         for _ in range(n_trials_per_compartment):
             true_pos = environment.random_point_in(comp.name, rng)
-            receiver = Receiver("probe", (*true_pos, 1.0))
-            trials.append((comp.name, true_pos, network.scan(receiver, rng)))
+            locations.append((comp.name, true_pos))
+    # Draw locations before scans so channel changes cannot change test points
+    # through different random-number consumption in the matched/use profiles.
+    trials = [
+        (compartment_name, true_pos,
+         evaluation.scan(Receiver("probe", (*true_pos, 1.0)), rng))
+        for compartment_name, true_pos in locations
+    ]
 
     for name, loc in localisers.items():
         errors = []
@@ -139,8 +165,11 @@ def report_compartment_breakdown(
     network: Network,
     rng: Random,
     n_trials_per_compartment: int = 300,
+    *,
+    evaluation_session: Optional[EvaluationSession] = None,
 ) -> None:
     environment = network.environment
+    evaluation = evaluation_session or create_evaluation_session(network)
     print("=== Compartment classification accuracy, split by TRUE compartment ===")
     print(f"{'Compartment':<16}" + "".join(f"{name:<24}" for name in localisers))
     for comp in environment.compartments:
@@ -148,7 +177,7 @@ def report_compartment_breakdown(
         for _ in range(n_trials_per_compartment):
             true_pos = environment.random_point_in(comp.name, rng)
             receiver = Receiver("probe", (*true_pos, 1.0))
-            trials.append(network.scan(receiver, rng))
+            trials.append(evaluation.scan(receiver, rng))
 
         row = f"{comp.name:<16}"
         for name, loc in localisers.items():
@@ -201,6 +230,8 @@ def _heatmap_values(
  
 def _draw_layout(ax, network: Network, fill_compartments: bool = True) -> None:
     """Draw compartments, walls, APs and receivers onto an existing axis."""
+    import matplotlib.patheffects as pe
+
     environment = network.environment
  
     for compartment in environment.compartments:
@@ -260,6 +291,8 @@ def plot_fingerprint_heatmap(
     cmap: str = "viridis",
     show: bool = True,
 ):
+    import matplotlib.pyplot as plt
+
     xs, ys, vals, label = _heatmap_values(radio_map, ap_order, metric, ap_name, coverage_threshold_dbm)
  
     if layout == "overlay":
@@ -323,15 +356,48 @@ def get_coordinate_guess(network: Network, receiver: Receiver, rng, localisers) 
 
 
 
-def main() -> None:
-    radio_map_rng = Random(12345)
-    demo_rng = Random(23456)
-    coverage_rng = Random(34567)
-    performance_rng = Random(45678)
-    breakdown_rng = Random(56789)
-    layout_path = Path(__file__).resolve().parent / "layouts" / "simple_layout2.yaml"
-    environment = ShipEnvironment.from_config(layout_path)
+def _positive_int(value: str) -> int:
+    result = int(value)
+    if result <= 0:
+        raise argparse.ArgumentTypeError("must be a positive integer")
+    return result
 
+
+def _positive_float(value: str) -> float:
+    result = float(value)
+    if not math.isfinite(result) or result <= 0:
+        raise argparse.ArgumentTypeError("must be finite and positive")
+    return result
+
+
+def _nonnegative_int(value: str) -> int:
+    result = int(value)
+    if result < 0:
+        raise argparse.ArgumentTypeError("must be a non-negative integer")
+    return result
+
+
+def main(argv: Optional[Sequence[str]] = None) -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--no-plots", action="store_true", help="Run benchmarks without plot windows")
+    parser.add_argument("--trials", type=_positive_int, default=300,
+                        help="Trials per compartment in each benchmark (default: 300)")
+    parser.add_argument("--grid-spacing", type=_positive_float, default=0.3,
+                        help="Fingerprint survey grid spacing in metres (default: 0.3)")
+    parser.add_argument("--calibration-samples", type=_positive_int, default=15,
+                        help="Scans per fingerprint reference point (default: 15)")
+    parser.add_argument("--evaluation-profile", choices=("matched", "deployment"), default="matched",
+                        help="Matched reference or survey-to-use sensitivity test (default: matched)")
+    parser.add_argument("--seed", type=_nonnegative_int, default=45678,
+                        help="Evaluation random seed; calibration stays fixed (default: 45678)")
+    args = parser.parse_args(argv)
+
+    radio_map_rng = Random(12345)
+    demo_rng = Random(args.seed + 1)
+    coverage_rng = Random(args.seed + 2)
+    performance_rng = Random(args.seed)
+    breakdown_rng = Random(args.seed + 3)
+    layout_path = Path(__file__).resolve().parent / "layouts" / "simple_layout2.yaml"
     ap1 = AccessPoint("Router1", "24:2f:d0:fb:85:b9", (4.5, 1.5, 1.5), 2412)
     ap2 = AccessPoint("Router2", "25:3f:d0:fb:85:c4", (1.5, 4.5, 1.0), 2412)
     ap3 = AccessPoint("Router3", "26:4f:d0:fb:85:c0", (8.0, 3.0, 0.5), 2412)
@@ -348,31 +414,77 @@ def main() -> None:
         access_points=[ap1, ap2, ap3, ap4, ap5],
         receivers=[re1, re2, re3, re4],
     )
+    environment = network.environment
+
+    # Deployment metadata is passed explicitly: estimators never inspect the
+    # simulated environment or receiver's ground-truth coordinates.
+    path_loss = PathLossModel(
+        reference_rssi_dbm=network.reference_rssi_dbm,
+        reference_distance_m=network.reference_distance_m,
+        path_loss_exponent=network.path_loss_exponent,
+    )
+    compartment_bounds = [comp.geometry.bounds for comp in environment.compartments]
+    bounds = (
+        (min(b[0] for b in compartment_bounds), min(b[1] for b in compartment_bounds)),
+        (max(b[2] for b in compartment_bounds), max(b[3] for b in compartment_bounds)),
+    ) if compartment_bounds else None
 
     ap_order = network.access_points
     radio_map = build_radio_map(
         network,
         radio_map_rng,
         ap_order,
-        grid_spacing_m=0.3,
-        samples_per_point=15,
+        grid_spacing_m=args.grid_spacing,
+        samples_per_point=args.calibration_samples,
     )
+    evaluation = create_evaluation_session(network, args.evaluation_profile, args.seed)
+    print(f"=== Evaluation profile: {args.evaluation_profile} (seed {args.seed}) ===")
+    print(evaluation.description())
+    print("Localisers receive ordinary Reading objects; simulated walls, NLOS labels, "
+          "channel diagnostics and true receiver positions are withheld.")
+    print()
 
     nearest_ap_localiser = NearestAPLocaliser()
-    weighted_distance_localiser = WeightedCentroidLocaliser(network, weight_mode="distance")
-    weighted_power_localiser = WeightedCentroidLocaliser(network, weight_mode="linear_power")
-    rss_trilateration_localiser = RSSTrilaterationLocaliser(network)
-    rtt_trilateration_localiser = RTTTrilaterationLocaliser(network)
+    weighted_distance_localiser = WeightedCentroidLocaliser(path_loss, weight_mode="distance")
+    weighted_power_localiser = WeightedCentroidLocaliser(path_loss, weight_mode="linear_power")
+    rss_trilateration_localiser = RSSTrilaterationLocaliser(path_loss, bounds=bounds)
+    rtt_trilateration_localiser = RTTTrilaterationLocaliser(
+        rtt_offset_ms=network.rtt_base_ms, bounds=bounds,
+    )
+    # A fixed, configured receiver height is assumed for all FTM estimates.
+    # The desk receiver deliberately differs, exposing deployment model error.
+    ftm_localiser = FTMLocaliser(receiver_height_m=1.0, bounds=bounds)
     fingerprint_localiser = FingerprintLocaliser(radio_map, ap_order, k=3)
+    fusion_localiser = FusionLocaliser(
+        nearest_ap_localiser,
+        weighted_power_localiser,
+        fingerprint_localiser,
+        ftm_localiser,
+    )
+    fixed_fusion_localiser = FixedWeightFusionLocaliser(
+        nearest_ap_localiser,
+        weighted_power_localiser,
+        fingerprint_localiser,
+        ftm_localiser,
+    )
 
     localisers = {
+        "Fusion": fusion_localiser,
+        "Fixed Fusion": fixed_fusion_localiser,
         "NearestAP": nearest_ap_localiser,
-        "WeightedCentroidDistance": weighted_distance_localiser,
-        "WeightedCentroidPower": weighted_power_localiser,
-        "RSSTrilateration": rss_trilateration_localiser,
-        "RTT": rtt_trilateration_localiser,
+        "WeightedCentroid(dist)": weighted_distance_localiser,
+        "WeightedCentroid(power)": weighted_power_localiser,
+        "RSS Trilateration": rss_trilateration_localiser,
+        "Legacy RTT": rtt_trilateration_localiser,
+        "FTM": ftm_localiser,
         "Fingerprint": fingerprint_localiser,
     }
+
+    def get_coordinate_guess(receiver: Receiver) -> Optional[tuple[float, float]]:
+        """Run the same fusion localiser that is evaluated by the benchmark."""
+        scan = evaluation.scan(receiver, demo_rng)
+        estimate = fusion_localiser.locate(scan)
+        return estimate.position if estimate is not None else None
 
     for i in range(10):
         re1_coordinate_guess = get_coordinate_guess(network, re1, demo_rng, localisers)
@@ -392,43 +504,21 @@ def main() -> None:
             f"{re2.name} in {re2_compartment_guess}"
         )
 
-    network.reset_channel_state()
-    report_ap_coverage(network, coverage_rng)
-    network.reset_channel_state()
-    report_localiser_stats(localisers, network, performance_rng)
-    network.reset_channel_state()
-    report_compartment_breakdown(localisers, network, breakdown_rng)
+    evaluation.network.reset_channel_state()
+    report_ap_coverage(network, coverage_rng, n_trials=args.trials,
+                       evaluation_session=evaluation)
+    evaluation.network.reset_channel_state()
+    report_localiser_stats(localisers, network, performance_rng,
+                           n_trials_per_compartment=args.trials,
+                           evaluation_session=evaluation)
+    evaluation.network.reset_channel_state()
+    report_compartment_breakdown(localisers, network, breakdown_rng,
+                                 n_trials_per_compartment=args.trials,
+                                 evaluation_session=evaluation)
 
-    #plot_fingerprint_heatmap(network, radio_map, ap_order, metric="best_signal", layout="overlay")
-    #plot_fingerprint_heatmap(network, radio_map, ap_order, metric="coverage", layout="side")
-
-
-    current_positions = {}
-
-    for receiver in network.receivers:
-        coordinate_guess = get_coordinate_guess(
-            network,
-            receiver,
-            demo_rng,
-            localisers,
-        )
-
-        current_positions[receiver.name] = {
-            "position": coordinate_guess,
-            "confidence": 0.85 if coordinate_guess is not None else 0.0,
-        }
-
-
-    dispatcher = IncidentDispatchGraph(
-        employee_db=ROOT / "wrapper" / "Employees.db",
-        environment=environment,
-        model="gpt-4o",
-    )
-    result = dispatcher.recommend(
-        incident="Somebody pooped on the floor",
-        incident_location="Laundry",
-        current_positions=current_positions,
-    )
+    if not args.no_plots:
+        plot_fingerprint_heatmap(network, radio_map, ap_order, metric="best_signal", layout="overlay")
+        plot_fingerprint_heatmap(network, radio_map, ap_order, metric="coverage", layout="side")
 
     try:
         print(result['rationale'])

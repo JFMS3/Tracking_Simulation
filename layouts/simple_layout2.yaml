@@ -133,3 +133,8 @@ propagation:
   rtt_outlier_probability: 0.01
   rtt_nlos_outlier_probability: 0.08
   rtt_outlier_mean_m: 2.0
+
+  # Provisional FTM delivery settings. Independent exchanges share stable
+  # device/NLOS biases; more samples do not remove those biases.
+  ftm_burst_size: 8
+  ftm_success_probability: 0.95
